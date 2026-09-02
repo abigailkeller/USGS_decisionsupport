@@ -40,16 +40,101 @@ function escapeHtml(value) {
 
 function renderPreview(kind, file, rows) {
   const headers = rows[0] || [];
-  const dataRows = rows.slice(1).slice(0, 4).map((row) => headers.map((_, index) => row[index] || ''));
   const summary = document.querySelector(`#${kind}-summary`);
   const check = document.querySelector(`#${kind}-check`);
   const card = document.querySelector(`[data-kind="${kind}"].drop-zone`).closest('.dataset-card');
-  summary.innerHTML = `<strong>${escapeHtml(file.name)}</strong><span>${rows.length - 1} rows · ${headers.length} columns</span>`;
   check.textContent = '✓';
   card.classList.add('has-file');
   let preview = card.querySelector('.data-preview');
   if (!preview) { preview = document.createElement('div'); preview.className = 'data-preview'; card.append(preview); }
-  preview.innerHTML = `<p>Preview</p><table><thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead><tbody>${dataRows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  let previewHeaders = headers;
+  const selectionConfig = {
+    catch: [
+      { key: 'date', label: 'Date column', pattern: /date|time/i, dateFormat: true },
+      { key: 'size', label: 'Crab size column', pattern: /size|length|carapace/i },
+      { key: 'trap-type', label: 'Trap type column', pattern: /trap.?type|gear.?type|type/i, help: 'Indicate whether the trap used to catch the crab is a minnow, fukui, or shrimp trap. All other trap types will be filtered out of the dataset' },
+      { key: 'trap-id', label: 'Trap ID column', pattern: /trap.?id|trap.?number|trap.?no/i, help: 'Unique ID that links the crab to the trap it was caught in' },
+    ],
+    effort: [
+      { key: 'date-set', label: 'Date set column', pattern: /date.?set|set.?date/i, dateFormat: true, dateFormatKey: 'date', dateFormatLabel: 'Date format for date set and date retrieved' },
+      { key: 'date-retrieved', label: 'Date retrieved column', pattern: /date.?retrieved|retrieved.?date|date.?pull/i, dateFormat: true, dateFormatKey: 'date' },
+      { key: 'trap-type', label: 'Trap type column', pattern: /trap.?type|gear.?type|type/i, help: 'Indicate whether the trap used to catch the crab is a minnow, fukui, or shrimp trap. All other trap types will be filtered out of the dataset' },
+      { key: 'trap-id', label: 'Trap ID column', pattern: /trap.?id|trap.?number|trap.?no/i, help: 'Unique ID that links the crab to the trap it was caught in' },
+      { key: 'crab-count', label: 'Crab count column', pattern: /crab.?count|count|number.?crab/i },
+    ],
+  };
+  if (selectionConfig[kind]) {
+    const fields = selectionConfig[kind];
+    let selection = card.querySelector('.column-selection');
+    if (!selection) {
+      selection = document.createElement('div');
+      selection.className = 'column-selection';
+      const dateFormatControl = (kind === 'effort' ? fields.find((field) => field.dateFormat) : null);
+      selection.innerHTML = `<p>Select ${kind} columns</p>${fields.map((field) => `<label for="${kind}-${field.key}-column"><span class="column-label">${field.label}${field.help ? `<span class="info-tooltip"><button class="info-tooltip-button" type="button" aria-label="More information about ${field.label}">?</button><span class="info-tooltip-text" role="tooltip">${field.help}</span></span>` : ''}</span><select id="${kind}-${field.key}-column"></select></label>${field.dateFormat && kind !== 'effort' ? `<label for="${kind}-${field.dateFormatKey || field.key}-format">${field.dateFormatLabel || 'Date format'}<select id="${kind}-${field.dateFormatKey || field.key}-format"><option value="">Select a date format</option><option value="MM-DD-YY">MM-DD-YY</option><option value="YYYY-MM-DD">YYYY-MM-DD</option><option value="YYYY/M/D">YYYY/M/D</option><option value="MM/DD/YYYY">MM/DD/YYYY</option><option value="DD-MM-YYYY">DD-MM-YYYY</option></select></label>` : ''}`).join('')}${dateFormatControl ? `<label for="effort-${dateFormatControl.dateFormatKey || 'date'}-format">${dateFormatControl.dateFormatLabel || 'Date format'}<select id="effort-${dateFormatControl.dateFormatKey || 'date'}-format"><option value="">Select a date format</option><option value="MM-DD-YY">MM-DD-YY</option><option value="YYYY-MM-DD">YYYY-MM-DD</option><option value="YYYY/M/D">YYYY/M/D</option><option value="MM/DD/YYYY">MM/DD/YYYY</option><option value="DD-MM-YYYY">DD-MM-YYYY</option></select></label>` : ''}`;
+      card.insertBefore(selection, preview);
+    }
+    selection.hidden = false;
+    fields.forEach((field) => {
+      const select = selection.querySelector(`#${kind}-${field.key}-column`);
+      const previousValue = select.value;
+      select.innerHTML = `<option value="">Select a column</option>${headers.map((header, index) => `<option value="${index}">${escapeHtml(header)}</option>`).join('')}`;
+      select.value = headers[Number(previousValue)] ? previousValue : '';
+      if (field.dateFormat) {
+        const formatKey = field.dateFormatKey || field.key;
+        const formatSelect = selection.querySelector(`#${kind}-${formatKey}-format`);
+        const savedFormat = uploadedData[kind]?.dateFormats?.[formatKey] || formatSelect.value;
+        formatSelect.value = savedFormat;
+        if (!formatSelect.dataset.bound) {
+          formatSelect.addEventListener('change', (event) => {
+            if (!uploadedData[kind]) uploadedData[kind] = { file, rows };
+            if (!uploadedData[kind].dateFormats) uploadedData[kind].dateFormats = {};
+            uploadedData[kind].dateFormats[formatKey] = event.target.value;
+          });
+          formatSelect.dataset.bound = 'true';
+        }
+      }
+    });
+    if (!selection.dataset.bound) {
+      selection.addEventListener('change', () => renderPreview(kind, file, rows));
+      selection.dataset.bound = 'true';
+    }
+    previewHeaders = fields.map((field) => {
+      const selectedValue = selection.querySelector(`#${kind}-${field.key}-column`).value;
+      return selectedValue === '' ? '' : headers[Number(selectedValue)];
+    });
+  }
+  const selectedIndexes = previewHeaders.map((header) => headers.indexOf(header));
+  let filteredRows = rows.slice(1);
+  let removedRows = [];
+  let removedTrapRows = 0;
+  const trapTypeField = selectionConfig[kind]?.find((field) => field.key === 'trap-type');
+  const trapTypeSelect = trapTypeField ? card.querySelector(`#${kind}-trap-type-column`) : null;
+  const trapTypeIndex = trapTypeSelect?.value === '' ? -1 : Number(trapTypeSelect?.value);
+  if (trapTypeField && trapTypeIndex >= 0) {
+    const allowedTrapTypes = new Set(['minnow', 'fukui', 'shrimp']);
+    const normalizedRows = filteredRows
+      .map((row) => {
+        const normalizedRow = [...row];
+        normalizedRow[trapTypeIndex] = (normalizedRow[trapTypeIndex] || '').replace(/\s+/g, '').toLowerCase();
+        return normalizedRow;
+      });
+    filteredRows = normalizedRows.filter((row) => allowedTrapTypes.has(row[trapTypeIndex]));
+    removedRows = normalizedRows.filter((row) => !allowedTrapTypes.has(row[trapTypeIndex]));
+    removedTrapRows = rows.length - 1 - filteredRows.length;
+  }
+  if (uploadedData[kind]) uploadedData[kind].filteredRows = filteredRows;
+  const dataRows = filteredRows.map((row) => selectedIndexes.map((index) => row[index] || ''));
+  const selectedCount = previewHeaders.filter((header) => header !== '').length;
+  summary.innerHTML = `<strong>${escapeHtml(file.name)}</strong><span>${filteredRows.length} rows · ${selectedCount} of ${previewHeaders.length} columns selected</span>`;
+  const renderTable = (tableRows) => `<div class="data-preview-scroll"><table><thead><tr>${previewHeaders.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead><tbody>${tableRows.map((row) => `<tr>${selectedIndexes.map((index) => `<td>${escapeHtml(row[index] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  const removalMessage = removedTrapRows > 0 ? `<p class="filter-message">${removedTrapRows} rows were removed because they were not a minnow, fukui, or shrimp trap.</p><label class="removed-rows-toggle"><input type="checkbox" id="show-removed-rows"${card.dataset.showRemoved === 'true' ? ' checked' : ''}> Show removed rows</label>` : '';
+  const removedPreview = removedTrapRows > 0 && card.dataset.showRemoved === 'true' ? `<p class="removed-rows-heading">Removed rows (${removedRows.length})</p>${renderTable(removedRows)}` : '';
+  preview.innerHTML = `${removalMessage}<p>Preview (all ${dataRows.length} rows)</p>${renderTable(filteredRows)}${removedPreview}`;
+  const removedToggle = preview.querySelector('#show-removed-rows');
+  if (removedToggle) removedToggle.addEventListener('change', (event) => {
+    card.dataset.showRemoved = String(event.target.checked);
+    renderPreview(kind, file, rows);
+  });
 }
 
 function handleFile(kind, file) {
