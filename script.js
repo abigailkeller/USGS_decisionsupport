@@ -89,13 +89,14 @@ function renderPreview(kind, file, rows) {
             if (!uploadedData[kind]) uploadedData[kind] = { file, rows };
             if (!uploadedData[kind].dateFormats) uploadedData[kind].dateFormats = {};
             uploadedData[kind].dateFormats[formatKey] = event.target.value;
+            resetQualityChecks();
           });
           formatSelect.dataset.bound = 'true';
         }
       }
     });
     if (!selection.dataset.bound) {
-      selection.addEventListener('change', () => renderPreview(kind, file, rows));
+      selection.addEventListener('change', () => { resetQualityChecks(); renderPreview(kind, file, rows); });
       selection.dataset.bound = 'true';
     }
     previewHeaders = fields.map((field) => {
@@ -137,9 +138,159 @@ function renderPreview(kind, file, rows) {
   });
 }
 
+function resetQualityChecks() {
+  const trigger = document.querySelector('#run-quality-checks');
+  const confirmBox = document.querySelector('#data-confirmed');
+  const list = document.querySelector('#quality-check-list');
+  if (trigger) trigger.checked = false;
+  if (list) { list.hidden = true; list.innerHTML = ''; }
+  if (confirmBox) { confirmBox.checked = false; confirmBox.disabled = true; }
+}
+
+function selectedColumnIndex(kind, key) {
+  const select = document.querySelector(`#${kind}-${key}-column`);
+  return select && select.value !== '' ? Number(select.value) : -1;
+}
+
+function selectedDateFormat(kind) {
+  const select = document.querySelector(`#${kind}-date-format`);
+  return select ? select.value : '';
+}
+
+function parseDateWithFormat(value, format) {
+  const trimmed = String(value ?? '').trim();
+  if (!trimmed || !format) return null;
+  const patterns = {
+    'MM-DD-YY': { regex: /^(\d{1,2})-(\d{1,2})-(\d{2})$/, order: ['month', 'day', 'year2'] },
+    'YYYY-MM-DD': { regex: /^(\d{4})-(\d{1,2})-(\d{1,2})$/, order: ['year', 'month', 'day'] },
+    'YYYY/M/D': { regex: /^(\d{4})\/(\d{1,2})\/(\d{1,2})$/, order: ['year', 'month', 'day'] },
+    'MM/DD/YYYY': { regex: /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/, order: ['month', 'day', 'year'] },
+    'DD-MM-YYYY': { regex: /^(\d{1,2})-(\d{1,2})-(\d{4})$/, order: ['day', 'month', 'year'] },
+  };
+  const spec = patterns[format];
+  if (!spec) return null;
+  const match = trimmed.match(spec.regex);
+  if (!match) return null;
+  const parts = {};
+  spec.order.forEach((name, index) => { parts[name] = Number(match[index + 1]); });
+  const year = parts.year ?? (parts.year2 !== undefined ? 2000 + parts.year2 : undefined);
+  const { month, day } = parts;
+  if (!year || !month || !day) return null;
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+  return date;
+}
+
+function runQualityChecks() {
+  const results = [];
+  if (!uploadedData.catch || !uploadedData.effort) {
+    results.push({ status: 'error', message: 'Upload both the catch and effort files before running data quality checks.' });
+    return results;
+  }
+  const catchCols = {
+    date: selectedColumnIndex('catch', 'date'),
+    size: selectedColumnIndex('catch', 'size'),
+    trapType: selectedColumnIndex('catch', 'trap-type'),
+    trapId: selectedColumnIndex('catch', 'trap-id'),
+  };
+  const effortCols = {
+    dateSet: selectedColumnIndex('effort', 'date-set'),
+    dateRetrieved: selectedColumnIndex('effort', 'date-retrieved'),
+    trapType: selectedColumnIndex('effort', 'trap-type'),
+    trapId: selectedColumnIndex('effort', 'trap-id'),
+    crabCount: selectedColumnIndex('effort', 'crab-count'),
+  };
+  const catchLabels = { date: 'catch date', size: 'catch crab size', trapType: 'catch trap type', trapId: 'catch trap ID' };
+  const effortLabels = { dateSet: 'effort date set', dateRetrieved: 'effort date retrieved', trapType: 'effort trap type', trapId: 'effort trap ID', crabCount: 'effort crab count' };
+  const missingColumns = [
+    ...Object.entries(catchCols).filter(([, index]) => index === -1).map(([key]) => catchLabels[key]),
+    ...Object.entries(effortCols).filter(([, index]) => index === -1).map(([key]) => effortLabels[key]),
+  ];
+  if (missingColumns.length) {
+    results.push({ status: 'error', message: `Select all required columns before running checks. Missing: ${missingColumns.join(', ')}.` });
+    return results;
+  }
+
+  const catchRows = uploadedData.catch.filteredRows || [];
+  const effortRows = uploadedData.effort.filteredRows || [];
+  const isBlank = (value) => !String(value ?? '').trim();
+
+  const catchMissing = catchRows.filter((row) => [catchCols.date, catchCols.size, catchCols.trapId].some((index) => isBlank(row[index]))).length;
+  results.push(catchMissing === 0
+    ? { status: 'pass', message: 'No missing values in the required catch columns.' }
+    : { status: 'error', message: `${catchMissing} catch row(s) are missing a date, size, or trap ID.` });
+
+  const effortMissing = effortRows.filter((row) => [effortCols.dateSet, effortCols.dateRetrieved, effortCols.trapId, effortCols.crabCount].some((index) => isBlank(row[index]))).length;
+  results.push(effortMissing === 0
+    ? { status: 'pass', message: 'No missing values in the required effort columns.' }
+    : { status: 'error', message: `${effortMissing} effort row(s) are missing a date, trap ID, or crab count.` });
+
+  const catchFormat = selectedDateFormat('catch');
+  if (!catchFormat) {
+    results.push({ status: 'error', message: 'Select a date format for the catch date column.' });
+  } else {
+    const invalidCatchDates = catchRows.filter((row) => !isBlank(row[catchCols.date]) && !parseDateWithFormat(row[catchCols.date], catchFormat)).length;
+    results.push(invalidCatchDates === 0
+      ? { status: 'pass', message: 'All catch dates match the selected date format.' }
+      : { status: 'error', message: `${invalidCatchDates} catch row(s) have a date that does not match the selected format.` });
+  }
+
+  const effortFormat = selectedDateFormat('effort');
+  if (!effortFormat) {
+    results.push({ status: 'error', message: 'Select a date format for the effort date columns.' });
+  } else {
+    let invalidEffortDates = 0;
+    let outOfOrderDates = 0;
+    effortRows.forEach((row) => {
+      const setDate = isBlank(row[effortCols.dateSet]) ? null : parseDateWithFormat(row[effortCols.dateSet], effortFormat);
+      const retrievedDate = isBlank(row[effortCols.dateRetrieved]) ? null : parseDateWithFormat(row[effortCols.dateRetrieved], effortFormat);
+      if ((!isBlank(row[effortCols.dateSet]) && !setDate) || (!isBlank(row[effortCols.dateRetrieved]) && !retrievedDate)) invalidEffortDates += 1;
+      else if (setDate && retrievedDate && retrievedDate < setDate) outOfOrderDates += 1;
+    });
+    results.push(invalidEffortDates === 0
+      ? { status: 'pass', message: 'All effort dates match the selected date format.' }
+      : { status: 'error', message: `${invalidEffortDates} effort row(s) have a date that does not match the selected format.` });
+    results.push(outOfOrderDates === 0
+      ? { status: 'pass', message: 'Every trap was retrieved on or after its set date.' }
+      : { status: 'error', message: `${outOfOrderDates} effort row(s) have a retrieval date before the set date.` });
+  }
+
+  const invalidCrabCounts = effortRows.filter((row) => {
+    if (isBlank(row[effortCols.crabCount])) return false;
+    const count = Number(row[effortCols.crabCount]);
+    return !Number.isFinite(count) || count < 0;
+  }).length;
+  results.push(invalidCrabCounts === 0
+    ? { status: 'pass', message: 'All effort crab counts are valid, non-negative numbers.' }
+    : { status: 'error', message: `${invalidCrabCounts} effort row(s) have a crab count that is missing, non-numeric, or negative.` });
+
+  const effortTrapIds = new Set(effortRows.map((row) => String(row[effortCols.trapId] ?? '').trim()).filter(Boolean));
+  const unmatchedTraps = catchRows.filter((row) => {
+    const trapId = String(row[catchCols.trapId] ?? '').trim();
+    return trapId && !effortTrapIds.has(trapId);
+  }).length;
+  results.push(unmatchedTraps === 0
+    ? { status: 'pass', message: 'Every catch record links to a trap that appears in the effort data.' }
+    : { status: 'warning', message: `${unmatchedTraps} catch row(s) reference a trap ID that isn't in the effort data.` });
+
+  const seenDeployments = new Set();
+  let duplicateDeployments = 0;
+  effortRows.forEach((row) => {
+    const key = `${row[effortCols.trapId]}|${row[effortCols.dateSet]}`;
+    if (seenDeployments.has(key)) duplicateDeployments += 1;
+    else seenDeployments.add(key);
+  });
+  results.push(duplicateDeployments === 0
+    ? { status: 'pass', message: 'No duplicate trap deployments found in the effort data.' }
+    : { status: 'warning', message: `${duplicateDeployments} effort row(s) repeat the same trap ID and set date.` });
+
+  return results;
+}
+
 function handleFile(kind, file) {
   const error = document.querySelector('#upload-error');
   error.hidden = true;
+  resetQualityChecks();
   if (!file) return;
   if (!file.name.toLowerCase().endsWith('.csv') && file.type !== 'text/csv') return showError(error, 'Please choose a CSV file for each dataset.');
   if (file.size > 10 * 1024 * 1024) return showError(error, 'Each file must be smaller than 10 MB.');
@@ -180,10 +331,29 @@ function goToStep(step) {
   document.querySelector('.step-content').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+document.querySelector('#run-quality-checks').addEventListener('change', (event) => {
+  const list = document.querySelector('#quality-check-list');
+  const confirmBox = document.querySelector('#data-confirmed');
+  if (!event.target.checked) {
+    list.hidden = true;
+    list.innerHTML = '';
+    confirmBox.checked = false;
+    confirmBox.disabled = true;
+    return;
+  }
+  const results = runQualityChecks();
+  const icons = { pass: '✓', warning: '!', error: '✕' };
+  list.innerHTML = results.map((result) => `<li class="is-${result.status}"><span class="quality-check-icon" aria-hidden="true">${icons[result.status]}</span>${escapeHtml(result.message)}</li>`).join('');
+  list.hidden = false;
+  const hasErrors = results.some((result) => result.status === 'error');
+  confirmBox.disabled = hasErrors;
+  if (hasErrors) confirmBox.checked = false;
+});
+
 document.querySelectorAll('.next-button').forEach((button) => button.addEventListener('click', () => {
   const nextStep = Number(button.dataset.next);
   const error = document.querySelector('#upload-error');
-  if (currentStep === 2 && (!uploadedData.catch || !uploadedData.effort || !document.querySelector('#data-confirmed').checked)) return showError(error, 'Upload both files and confirm that their previews look correct before continuing.');
+  if (currentStep === 2 && (!uploadedData.catch || !uploadedData.effort || !document.querySelector('#data-confirmed').checked)) return showError(error, 'Upload both files, run data quality checks, and confirm that their previews look correct before continuing.');
   if (button.classList.contains('gated-next') && !button.closest('.step-view').querySelector('.step-check').checked) return;
   goToStep(nextStep);
 }));
