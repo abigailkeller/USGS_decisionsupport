@@ -56,8 +56,7 @@ function renderPreview(kind, file, rows) {
       { key: 'trap-id', label: 'Trap ID column', pattern: /trap.?id|trap.?number|trap.?no/i, help: 'Unique ID that links the crab to the trap it was caught in' },
     ],
     effort: [
-      { key: 'date-set', label: 'Date set column', pattern: /date.?set|set.?date/i, dateFormat: true, dateFormatKey: 'date', dateFormatLabel: 'Date format for date set and date retrieved' },
-      { key: 'date-retrieved', label: 'Date retrieved column', pattern: /date.?retrieved|retrieved.?date|date.?pull/i, dateFormat: true, dateFormatKey: 'date' },
+      { key: 'date-checked', label: 'Date checked column', pattern: /date.?check|check.?date|date.?set|date.?retrieved|date.?pull/i, dateFormat: true },
       { key: 'trap-type', label: 'Trap type column', pattern: /trap.?type|gear.?type|type/i, help: 'Indicate whether the trap used to catch the crab is a minnow, fukui, or shrimp trap. All other trap types will be filtered out of the dataset' },
       { key: 'trap-id', label: 'Trap ID column', pattern: /trap.?id|trap.?number|trap.?no/i, help: 'Unique ID that links the crab to the trap it was caught in' },
       { key: 'crab-count', label: 'Crab count column', pattern: /crab.?count|count|number.?crab/i },
@@ -69,8 +68,7 @@ function renderPreview(kind, file, rows) {
     if (!selection) {
       selection = document.createElement('div');
       selection.className = 'column-selection';
-      const dateFormatControl = (kind === 'effort' ? fields.find((field) => field.dateFormat) : null);
-      selection.innerHTML = `<p>Select ${kind} columns</p>${fields.map((field) => `<label for="${kind}-${field.key}-column"><span class="column-label">${field.label}${field.help ? `<span class="info-tooltip"><button class="info-tooltip-button" type="button" aria-label="More information about ${field.label}">?</button><span class="info-tooltip-text" role="tooltip">${field.help}</span></span>` : ''}</span><select id="${kind}-${field.key}-column"></select></label>${field.dateFormat && kind !== 'effort' ? `<label for="${kind}-${field.dateFormatKey || field.key}-format">${field.dateFormatLabel || 'Date format'}<select id="${kind}-${field.dateFormatKey || field.key}-format"><option value="">Select a date format</option><option value="MM-DD-YY">MM-DD-YY</option><option value="YYYY-MM-DD">YYYY-MM-DD</option><option value="YYYY/M/D">YYYY/M/D</option><option value="MM/DD/YYYY">MM/DD/YYYY</option><option value="DD-MM-YYYY">DD-MM-YYYY</option></select></label>` : ''}`).join('')}${dateFormatControl ? `<label for="effort-${dateFormatControl.dateFormatKey || 'date'}-format">${dateFormatControl.dateFormatLabel || 'Date format'}<select id="effort-${dateFormatControl.dateFormatKey || 'date'}-format"><option value="">Select a date format</option><option value="MM-DD-YY">MM-DD-YY</option><option value="YYYY-MM-DD">YYYY-MM-DD</option><option value="YYYY/M/D">YYYY/M/D</option><option value="MM/DD/YYYY">MM/DD/YYYY</option><option value="DD-MM-YYYY">DD-MM-YYYY</option></select></label>` : ''}`;
+      selection.innerHTML = `<p>Select ${kind} columns</p>${fields.map((field) => `<label for="${kind}-${field.key}-column"><span class="column-label">${field.label}${field.help ? `<span class="info-tooltip"><button class="info-tooltip-button" type="button" aria-label="More information about ${field.label}">?</button><span class="info-tooltip-text" role="tooltip">${field.help}</span></span>` : ''}</span><select id="${kind}-${field.key}-column"></select></label>${field.dateFormat ? `<label for="${kind}-${field.key}-format">${field.dateFormatLabel || 'Date format'}<select id="${kind}-${field.key}-format"><option value="">Select a date format</option><option value="MM-DD-YY">MM-DD-YY</option><option value="YYYY-MM-DD">YYYY-MM-DD</option><option value="YYYY/M/D">YYYY/M/D</option><option value="MM/DD/YYYY">MM/DD/YYYY</option><option value="DD-MM-YYYY">DD-MM-YYYY</option></select></label>` : ''}`).join('')}`;
       card.insertBefore(selection, preview);
     }
     selection.hidden = false;
@@ -80,15 +78,14 @@ function renderPreview(kind, file, rows) {
       select.innerHTML = `<option value="">Select a column</option>${headers.map((header, index) => `<option value="${index}">${escapeHtml(header)}</option>`).join('')}`;
       select.value = headers[Number(previousValue)] ? previousValue : '';
       if (field.dateFormat) {
-        const formatKey = field.dateFormatKey || field.key;
-        const formatSelect = selection.querySelector(`#${kind}-${formatKey}-format`);
-        const savedFormat = uploadedData[kind]?.dateFormats?.[formatKey] || formatSelect.value;
+        const formatSelect = selection.querySelector(`#${kind}-${field.key}-format`);
+        const savedFormat = uploadedData[kind]?.dateFormats?.[field.key] || formatSelect.value;
         formatSelect.value = savedFormat;
         if (!formatSelect.dataset.bound) {
           formatSelect.addEventListener('change', (event) => {
             if (!uploadedData[kind]) uploadedData[kind] = { file, rows };
             if (!uploadedData[kind].dateFormats) uploadedData[kind].dateFormats = {};
-            uploadedData[kind].dateFormats[formatKey] = event.target.value;
+            uploadedData[kind].dateFormats[field.key] = event.target.value;
             resetQualityChecks();
           });
           formatSelect.dataset.bound = 'true';
@@ -123,19 +120,53 @@ function renderPreview(kind, file, rows) {
     removedRows = normalizedRows.filter((row) => !allowedTrapTypes.has(row[trapTypeIndex]));
     removedTrapRows = rows.length - 1 - filteredRows.length;
   }
+  let removedCrabCountRows = 0;
+  const crabCountField = selectionConfig[kind]?.find((field) => field.key === 'crab-count');
+  const crabCountSelect = crabCountField ? card.querySelector(`#${kind}-crab-count-column`) : null;
+  const crabCountIndex = crabCountSelect?.value === '' ? -1 : Number(crabCountSelect?.value);
+  if (crabCountField && crabCountIndex >= 0) {
+    const isValidCrabCount = (row) => {
+      const rawValue = row[crabCountIndex];
+      if (!String(rawValue ?? '').trim()) return false;
+      const count = Number(rawValue);
+      return Number.isFinite(count) && count >= 0;
+    };
+    const beforeCrabCountFilter = filteredRows.length;
+    removedRows = removedRows.concat(filteredRows.filter((row) => !isValidCrabCount(row)));
+    filteredRows = filteredRows.filter(isValidCrabCount);
+    removedCrabCountRows = beforeCrabCountFilter - filteredRows.length;
+  }
   if (uploadedData[kind]) uploadedData[kind].filteredRows = filteredRows;
   const dataRows = filteredRows.map((row) => selectedIndexes.map((index) => row[index] || ''));
   const selectedCount = previewHeaders.filter((header) => header !== '').length;
   summary.innerHTML = `<strong>${escapeHtml(file.name)}</strong><span>${filteredRows.length} rows · ${selectedCount} of ${previewHeaders.length} columns selected</span>`;
   const renderTable = (tableRows) => `<div class="data-preview-scroll"><table><thead><tr>${previewHeaders.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead><tbody>${tableRows.map((row) => `<tr>${selectedIndexes.map((index) => `<td>${escapeHtml(row[index] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
-  const removalMessage = removedTrapRows > 0 ? `<p class="filter-message">${removedTrapRows} rows were removed because they were not a minnow, fukui, or shrimp trap.</p><label class="removed-rows-toggle"><input type="checkbox" id="show-removed-rows"${card.dataset.showRemoved === 'true' ? ' checked' : ''}> Show removed rows</label>` : '';
-  const removedPreview = removedTrapRows > 0 && card.dataset.showRemoved === 'true' ? `<p class="removed-rows-heading">Removed rows (${removedRows.length})</p>${renderTable(removedRows)}` : '';
+  const removalReasons = [];
+  if (removedTrapRows > 0) removalReasons.push(`${removedTrapRows} rows were removed because they were not a minnow, fukui, or shrimp trap.`);
+  if (removedCrabCountRows > 0) removalReasons.push(`${removedCrabCountRows} rows were removed because the crab count was missing, non-numeric, or negative.`);
+  const removalMessage = removalReasons.length ? `${removalReasons.map((reason) => `<p class="filter-message">${reason}</p>`).join('')}<label class="removed-rows-toggle"><input type="checkbox" id="show-removed-rows"${card.dataset.showRemoved === 'true' ? ' checked' : ''}> Show removed rows</label>` : '';
+  const removedPreview = removedRows.length > 0 && card.dataset.showRemoved === 'true' ? `<p class="removed-rows-heading">Removed rows (${removedRows.length})</p>${renderTable(removedRows)}` : '';
   preview.innerHTML = `${removalMessage}<p>Preview (all ${dataRows.length} rows)</p>${renderTable(filteredRows)}${removedPreview}`;
   const removedToggle = preview.querySelector('#show-removed-rows');
   if (removedToggle) removedToggle.addEventListener('change', (event) => {
     card.dataset.showRemoved = String(event.target.checked);
     renderPreview(kind, file, rows);
   });
+  updateQualityCheckGating();
+}
+
+function allColumnsSelected() {
+  if (!uploadedData.catch || !uploadedData.effort) return false;
+  const requiredKeys = { catch: ['date', 'size', 'trap-type', 'trap-id'], effort: ['date-checked', 'trap-type', 'trap-id', 'crab-count'] };
+  return Object.entries(requiredKeys).every(([kind, keys]) => keys.every((key) => selectedColumnIndex(kind, key) !== -1));
+}
+
+function updateQualityCheckGating() {
+  const trigger = document.querySelector('#run-quality-checks');
+  const confirmBox = document.querySelector('#data-confirmed');
+  const continueButton = document.querySelector('.step-view[data-view="2"] .next-button');
+  if (trigger) trigger.disabled = !allColumnsSelected();
+  if (continueButton) continueButton.disabled = !(trigger?.checked && confirmBox?.checked);
 }
 
 function resetQualityChecks() {
@@ -145,6 +176,7 @@ function resetQualityChecks() {
   if (trigger) trigger.checked = false;
   if (list) { list.hidden = true; list.innerHTML = ''; }
   if (confirmBox) { confirmBox.checked = false; confirmBox.disabled = true; }
+  updateQualityCheckGating();
 }
 
 function selectedColumnIndex(kind, key) {
@@ -152,8 +184,8 @@ function selectedColumnIndex(kind, key) {
   return select && select.value !== '' ? Number(select.value) : -1;
 }
 
-function selectedDateFormat(kind) {
-  const select = document.querySelector(`#${kind}-date-format`);
+function selectedDateFormat(kind, key) {
+  const select = document.querySelector(`#${kind}-${key}-format`);
   return select ? select.value : '';
 }
 
@@ -194,14 +226,13 @@ function runQualityChecks() {
     trapId: selectedColumnIndex('catch', 'trap-id'),
   };
   const effortCols = {
-    dateSet: selectedColumnIndex('effort', 'date-set'),
-    dateRetrieved: selectedColumnIndex('effort', 'date-retrieved'),
+    dateChecked: selectedColumnIndex('effort', 'date-checked'),
     trapType: selectedColumnIndex('effort', 'trap-type'),
     trapId: selectedColumnIndex('effort', 'trap-id'),
     crabCount: selectedColumnIndex('effort', 'crab-count'),
   };
   const catchLabels = { date: 'catch date', size: 'catch crab size', trapType: 'catch trap type', trapId: 'catch trap ID' };
-  const effortLabels = { dateSet: 'effort date set', dateRetrieved: 'effort date retrieved', trapType: 'effort trap type', trapId: 'effort trap ID', crabCount: 'effort crab count' };
+  const effortLabels = { dateChecked: 'effort date checked', trapType: 'effort trap type', trapId: 'effort trap ID', crabCount: 'effort crab count' };
   const missingColumns = [
     ...Object.entries(catchCols).filter(([, index]) => index === -1).map(([key]) => catchLabels[key]),
     ...Object.entries(effortCols).filter(([, index]) => index === -1).map(([key]) => effortLabels[key]),
@@ -214,18 +245,19 @@ function runQualityChecks() {
   const catchRows = uploadedData.catch.filteredRows || [];
   const effortRows = uploadedData.effort.filteredRows || [];
   const isBlank = (value) => !String(value ?? '').trim();
+  const normalizeTrapId = (value) => String(value ?? '').trim().replace(/\s+/g, ' ');
 
   const catchMissing = catchRows.filter((row) => [catchCols.date, catchCols.size, catchCols.trapId].some((index) => isBlank(row[index]))).length;
   results.push(catchMissing === 0
     ? { status: 'pass', message: 'No missing values in the required catch columns.' }
     : { status: 'error', message: `${catchMissing} catch row(s) are missing a date, size, or trap ID.` });
 
-  const effortMissing = effortRows.filter((row) => [effortCols.dateSet, effortCols.dateRetrieved, effortCols.trapId, effortCols.crabCount].some((index) => isBlank(row[index]))).length;
+  const effortMissing = effortRows.filter((row) => [effortCols.dateChecked, effortCols.trapId, effortCols.crabCount].some((index) => isBlank(row[index]))).length;
   results.push(effortMissing === 0
     ? { status: 'pass', message: 'No missing values in the required effort columns.' }
     : { status: 'error', message: `${effortMissing} effort row(s) are missing a date, trap ID, or crab count.` });
 
-  const catchFormat = selectedDateFormat('catch');
+  const catchFormat = selectedDateFormat('catch', 'date');
   if (!catchFormat) {
     results.push({ status: 'error', message: 'Select a date format for the catch date column.' });
   } else {
@@ -235,24 +267,14 @@ function runQualityChecks() {
       : { status: 'error', message: `${invalidCatchDates} catch row(s) have a date that does not match the selected format.` });
   }
 
-  const effortFormat = selectedDateFormat('effort');
+  const effortFormat = selectedDateFormat('effort', 'date-checked');
   if (!effortFormat) {
-    results.push({ status: 'error', message: 'Select a date format for the effort date columns.' });
+    results.push({ status: 'error', message: 'Select a date format for the effort date checked column.' });
   } else {
-    let invalidEffortDates = 0;
-    let outOfOrderDates = 0;
-    effortRows.forEach((row) => {
-      const setDate = isBlank(row[effortCols.dateSet]) ? null : parseDateWithFormat(row[effortCols.dateSet], effortFormat);
-      const retrievedDate = isBlank(row[effortCols.dateRetrieved]) ? null : parseDateWithFormat(row[effortCols.dateRetrieved], effortFormat);
-      if ((!isBlank(row[effortCols.dateSet]) && !setDate) || (!isBlank(row[effortCols.dateRetrieved]) && !retrievedDate)) invalidEffortDates += 1;
-      else if (setDate && retrievedDate && retrievedDate < setDate) outOfOrderDates += 1;
-    });
+    const invalidEffortDates = effortRows.filter((row) => !isBlank(row[effortCols.dateChecked]) && !parseDateWithFormat(row[effortCols.dateChecked], effortFormat)).length;
     results.push(invalidEffortDates === 0
       ? { status: 'pass', message: 'All effort dates match the selected date format.' }
       : { status: 'error', message: `${invalidEffortDates} effort row(s) have a date that does not match the selected format.` });
-    results.push(outOfOrderDates === 0
-      ? { status: 'pass', message: 'Every trap was retrieved on or after its set date.' }
-      : { status: 'error', message: `${outOfOrderDates} effort row(s) have a retrieval date before the set date.` });
   }
 
   const invalidCrabCounts = effortRows.filter((row) => {
@@ -264,25 +286,41 @@ function runQualityChecks() {
     ? { status: 'pass', message: 'All effort crab counts are valid, non-negative numbers.' }
     : { status: 'error', message: `${invalidCrabCounts} effort row(s) have a crab count that is missing, non-numeric, or negative.` });
 
-  const effortTrapIds = new Set(effortRows.map((row) => String(row[effortCols.trapId] ?? '').trim()).filter(Boolean));
-  const unmatchedTraps = catchRows.filter((row) => {
-    const trapId = String(row[catchCols.trapId] ?? '').trim();
-    return trapId && !effortTrapIds.has(trapId);
-  }).length;
-  results.push(unmatchedTraps === 0
-    ? { status: 'pass', message: 'Every catch record links to a trap that appears in the effort data.' }
-    : { status: 'warning', message: `${unmatchedTraps} catch row(s) reference a trap ID that isn't in the effort data.` });
+  const dateKey = (date) => `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+  const effortDeployments = new Set(effortRows.map((row) => {
+    const trapId = normalizeTrapId(row[effortCols.trapId]);
+    const date = effortFormat && !isBlank(row[effortCols.dateChecked]) ? parseDateWithFormat(row[effortCols.dateChecked], effortFormat) : null;
+    return trapId && date ? `${trapId}|${dateKey(date)}` : null;
+  }).filter(Boolean));
+  const formatDateForDisplay = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  const unmatchedRows = catchRows.filter((row) => {
+    const trapId = normalizeTrapId(row[catchCols.trapId]);
+    const date = catchFormat && !isBlank(row[catchCols.date]) ? parseDateWithFormat(row[catchCols.date], catchFormat) : null;
+    if (!trapId || !date) return false;
+    return !effortDeployments.has(`${trapId}|${dateKey(date)}`);
+  }).map((row) => `${formatDateForDisplay(parseDateWithFormat(row[catchCols.date], catchFormat))} / ${normalizeTrapId(row[catchCols.trapId])}`);
+  results.push(unmatchedRows.length === 0
+    ? { status: 'pass', message: 'Every catch record\'s date and trap ID match a deployment in the effort data.' }
+    : { status: 'warning', message: `${unmatchedRows.length} catch row(s) have a date/trap ID combination that isn't in the effort data: ${unmatchedRows.join(', ')}. These rows will be removed in subsequent analyses.` });
 
   const seenDeployments = new Set();
   let duplicateDeployments = 0;
   effortRows.forEach((row) => {
-    const key = `${row[effortCols.trapId]}|${row[effortCols.dateSet]}`;
+    const key = `${normalizeTrapId(row[effortCols.trapId])}|${row[effortCols.dateChecked]}`;
     if (seenDeployments.has(key)) duplicateDeployments += 1;
     else seenDeployments.add(key);
   });
   results.push(duplicateDeployments === 0
     ? { status: 'pass', message: 'No duplicate trap deployments found in the effort data.' }
-    : { status: 'warning', message: `${duplicateDeployments} effort row(s) repeat the same trap ID and set date.` });
+    : { status: 'warning', message: `${duplicateDeployments} effort row(s) repeat the same trap ID and date checked.` });
+
+  const totalCrabCount = effortRows.reduce((sum, row) => {
+    const count = Number(row[effortCols.crabCount]);
+    return sum + (Number.isFinite(count) && count >= 0 ? count : 0);
+  }, 0);
+  results.push(totalCrabCount === catchRows.length
+    ? { status: 'pass', message: 'The sum of the effort crab counts matches the number of catch rows.' }
+    : { status: 'warning', message: `The sum of the effort crab counts (${totalCrabCount}) does not match the number of catch rows (${catchRows.length}).` });
 
   return results;
 }
@@ -339,6 +377,7 @@ document.querySelector('#run-quality-checks').addEventListener('change', (event)
     list.innerHTML = '';
     confirmBox.checked = false;
     confirmBox.disabled = true;
+    updateQualityCheckGating();
     return;
   }
   const results = runQualityChecks();
@@ -348,7 +387,9 @@ document.querySelector('#run-quality-checks').addEventListener('change', (event)
   const hasErrors = results.some((result) => result.status === 'error');
   confirmBox.disabled = hasErrors;
   if (hasErrors) confirmBox.checked = false;
+  updateQualityCheckGating();
 });
+document.querySelector('#data-confirmed').addEventListener('change', updateQualityCheckGating);
 
 document.querySelectorAll('.next-button').forEach((button) => button.addEventListener('click', () => {
   const nextStep = Number(button.dataset.next);
