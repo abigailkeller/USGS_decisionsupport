@@ -352,6 +352,227 @@ function canEnterStep(step) {
   return true;
 }
 
+const BIWEEK_BREAKS = [59, 76, 91, 106, 121, 137, 152, 167, 182, 198, 213, 229, 244, 259, 274, 290, 305, 320, 335];
+const TRAP_COLORS = { minnow: '#eb806b', fukui: '#4a9974', shrimp: '#8452c9' };
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function colorForTrapType(trapType) {
+  return TRAP_COLORS[trapType] || '#7c8b85';
+}
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function formatDateLong(date) {
+  return `${MONTH_ABBR[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`;
+}
+
+function formatTooltipNumber(value) {
+  return Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100);
+}
+
+function ensureChartTooltip() {
+  let tooltip = document.querySelector('#chart-tooltip');
+  if (!tooltip) {
+    tooltip = document.createElement('div');
+    tooltip.id = 'chart-tooltip';
+    tooltip.className = 'chart-tooltip';
+    tooltip.hidden = true;
+    document.body.append(tooltip);
+  }
+  return tooltip;
+}
+
+function attachChartInteractions(mount) {
+  const tooltip = ensureChartTooltip();
+  mount.querySelectorAll('.chart-point').forEach((point) => {
+    point.addEventListener('mouseenter', () => {
+      tooltip.textContent = point.dataset.tooltip;
+      tooltip.hidden = false;
+    });
+    point.addEventListener('mousemove', (event) => {
+      tooltip.style.left = `${event.clientX}px`;
+      tooltip.style.top = `${event.clientY}px`;
+    });
+    point.addEventListener('mouseleave', () => { tooltip.hidden = true; });
+  });
+}
+
+function downloadChartAsPng(mountId, filename) {
+  const svg = document.querySelector(`#${mountId} svg`);
+  if (!svg) return;
+  const [, , svgWidth, svgHeight] = svg.getAttribute('viewBox').split(' ').map(Number);
+  const scale = 2;
+  const svgString = new XMLSerializer().serializeToString(svg);
+  const svgUrl = URL.createObjectURL(new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' }));
+  const image = new Image();
+  image.onload = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = svgWidth * scale;
+    canvas.height = svgHeight * scale;
+    const context = canvas.getContext('2d');
+    context.fillStyle = cssVar('--panel') || '#ffffff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    URL.revokeObjectURL(svgUrl);
+    canvas.toBlob((blob) => {
+      const downloadUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = `${filename}.png`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(downloadUrl);
+    }, 'image/png');
+  };
+  image.src = svgUrl;
+}
+
+function dayOfYear(date) {
+  const start = new Date(date.getFullYear(), 0, 0);
+  return Math.floor((date - start) / 86400000);
+}
+
+function biweekBreakFor(date) {
+  const jday = dayOfYear(date);
+  let index = -1;
+  BIWEEK_BREAKS.forEach((brk, i) => { if (jday > brk) index = i; });
+  return index === -1 ? null : BIWEEK_BREAKS[index];
+}
+
+function buildVisualizationData() {
+  const catchCols = { date: selectedColumnIndex('catch', 'date'), size: selectedColumnIndex('catch', 'size'), trapType: selectedColumnIndex('catch', 'trap-type') };
+  const effortCols = { dateChecked: selectedColumnIndex('effort', 'date-checked'), trapType: selectedColumnIndex('effort', 'trap-type'), crabCount: selectedColumnIndex('effort', 'crab-count') };
+  const catchFormat = selectedDateFormat('catch', 'date');
+  const effortFormat = selectedDateFormat('effort', 'date-checked');
+  const catchRows = uploadedData.catch?.filteredRows || [];
+  const effortRows = uploadedData.effort?.filteredRows || [];
+  const normalizeTrapType = (value) => String(value ?? '').trim().toLowerCase();
+
+  const catchPoints = catchRows.map((row) => {
+    const date = catchFormat ? parseDateWithFormat(row[catchCols.date], catchFormat) : null;
+    const size = Number(row[catchCols.size]);
+    if (!date || !Number.isFinite(size)) return null;
+    return { x: date.getTime(), y: size, series: normalizeTrapType(row[catchCols.trapType]) };
+  }).filter(Boolean);
+
+  const groups = new Map();
+  effortRows.forEach((row) => {
+    const date = effortFormat ? parseDateWithFormat(row[effortCols.dateChecked], effortFormat) : null;
+    const crabCount = Number(row[effortCols.crabCount]);
+    if (!date || !Number.isFinite(crabCount)) return;
+    const jday = biweekBreakFor(date);
+    if (jday === null) return;
+    const trapType = normalizeTrapType(row[effortCols.trapType]);
+    const key = `${jday}|${trapType}`;
+    if (!groups.has(key)) groups.set(key, { jday, trapType, n: 0, totalCatch: 0 });
+    const group = groups.get(key);
+    group.n += 1;
+    group.totalCatch += crabCount;
+  });
+  const effortSummary = [...groups.values()];
+
+  return {
+    catchPoints,
+    cpuePoints: effortSummary.map((g) => ({ x: g.jday, y: g.n > 0 ? g.totalCatch / g.n : 0, series: g.trapType })),
+    effortPoints: effortSummary.map((g) => ({ x: g.jday, y: g.n, series: g.trapType })),
+    totalCatchPoints: effortSummary.map((g) => ({ x: g.jday, y: g.totalCatch, series: g.trapType })),
+  };
+}
+
+function niceAxisTicks(min, max, count) {
+  const lo = min === max ? min - 1 : min;
+  const hi = min === max ? max + 1 : max;
+  const step = (hi - lo) / count;
+  return Array.from({ length: count + 1 }, (_, i) => lo + step * i);
+}
+
+function formatAxisNumber(value) {
+  return Math.abs(value) >= 100 ? String(Math.round(value)) : String(Math.round(value * 10) / 10);
+}
+
+function formatDateShort(date) {
+  return `${MONTH_ABBR[date.getMonth()]} ${date.getDate()}`;
+}
+
+function renderSvgChart(mountId, points, opts) {
+  const mount = document.querySelector(`#${mountId}`);
+  if (!mount) return;
+  if (!points.length) { mount.innerHTML = '<p class="chart-empty">No data to display.</p>'; return; }
+
+  const width = 440;
+  const plotHeight = 220;
+  const legendHeight = 26;
+  const height = plotHeight + legendHeight;
+  const margin = { top: 12, right: 16, bottom: 32, left: 46 };
+  const innerWidth = width - margin.left - margin.right;
+  const innerHeight = plotHeight - margin.top - margin.bottom;
+  const lineColor = cssVar('--line');
+  const mutedColor = cssVar('--muted');
+
+  const xTicks = niceAxisTicks(Math.min(...points.map((p) => p.x)), Math.max(...points.map((p) => p.x)), 4);
+  const yTicks = niceAxisTicks(Math.min(0, ...points.map((p) => p.y)), Math.max(...points.map((p) => p.y)), 4);
+  const xScale = (x) => margin.left + ((x - xTicks[0]) / (xTicks[xTicks.length - 1] - xTicks[0] || 1)) * innerWidth;
+  const yScale = (y) => margin.top + innerHeight - ((y - yTicks[0]) / (yTicks[yTicks.length - 1] - yTicks[0] || 1)) * innerHeight;
+
+  const seriesMap = new Map();
+  points.forEach((point) => {
+    if (!seriesMap.has(point.series)) seriesMap.set(point.series, []);
+    seriesMap.get(point.series).push(point);
+  });
+
+  const gridLines = yTicks.map((tick) => `<line x1="${margin.left}" x2="${width - margin.right}" y1="${yScale(tick)}" y2="${yScale(tick)}" stroke="${lineColor}" stroke-width="1" />`).join('');
+  const yAxisLabels = yTicks.map((tick) => `<text x="${margin.left - 8}" y="${yScale(tick) + 3}" text-anchor="end" font-size="9" fill="${mutedColor}">${formatAxisNumber(tick)}</text>`).join('');
+  const xAxisLabels = xTicks.map((tick) => `<text x="${xScale(tick)}" y="${plotHeight - margin.bottom + 16}" text-anchor="middle" font-size="9" fill="${mutedColor}">${opts.xIsDate ? formatDateShort(new Date(tick)) : formatAxisNumber(tick)}</text>`).join('');
+
+  let seriesMarkup = '';
+  [...seriesMap.entries()].sort(([a], [b]) => a.localeCompare(b)).forEach(([series, rows]) => {
+    const color = colorForTrapType(series);
+    const sorted = [...rows].sort((a, b) => a.x - b.x);
+    if (opts.mode === 'line') {
+      seriesMarkup += `<polyline points="${sorted.map((p) => `${xScale(p.x)},${yScale(p.y)}`).join(' ')}" fill="none" stroke="${color}" stroke-width="2" />`;
+    }
+    seriesMarkup += sorted.map((p) => {
+      const xDisplay = opts.xIsDate ? formatDateLong(new Date(p.x)) : formatAxisNumber(p.x);
+      const tooltip = `${series}\n${opts.xLabel}: ${xDisplay}\n${opts.yLabel}: ${formatTooltipNumber(p.y)}`;
+      return `<circle class="chart-point" cx="${xScale(p.x)}" cy="${yScale(p.y)}" r="4" fill="${color}" data-tooltip="${escapeHtml(tooltip)}"></circle>`;
+    }).join('');
+  });
+
+  const legendY = plotHeight + legendHeight / 2 + 3;
+  let legendX = margin.left;
+  let legendMarkup = '';
+  [...seriesMap.keys()].sort().forEach((series) => {
+    legendMarkup += `<circle cx="${legendX + 4}" cy="${legendY - 3}" r="4" fill="${colorForTrapType(series)}" />`;
+    legendMarkup += `<text x="${legendX + 13}" y="${legendY}" font-size="10" fill="${mutedColor}">${escapeHtml(series)}</text>`;
+    legendX += 17 + series.length * 5.6 + 16;
+  });
+
+  mount.innerHTML = `<svg viewBox="0 0 ${width} ${height}" font-family="'DM Sans', Arial, sans-serif" role="img" aria-label="${escapeHtml(opts.yLabel)} by ${escapeHtml(opts.xLabel)}">
+    ${gridLines}
+    <line x1="${margin.left}" x2="${margin.left}" y1="${margin.top}" y2="${plotHeight - margin.bottom}" stroke="${lineColor}" />
+    <line x1="${margin.left}" x2="${width - margin.right}" y1="${plotHeight - margin.bottom}" y2="${plotHeight - margin.bottom}" stroke="${lineColor}" />
+    ${yAxisLabels}
+    ${xAxisLabels}
+    ${seriesMarkup}
+    <text x="${margin.left + innerWidth / 2}" y="${plotHeight - 4}" text-anchor="middle" font-size="10" fill="${mutedColor}">${escapeHtml(opts.xLabel)}</text>
+    <text x="12" y="${margin.top + innerHeight / 2}" text-anchor="middle" font-size="10" fill="${mutedColor}" transform="rotate(-90 12 ${margin.top + innerHeight / 2})">${escapeHtml(opts.yLabel)}</text>
+    ${legendMarkup}
+  </svg>`;
+
+  attachChartInteractions(mount);
+}
+
+function renderVisualizations() {
+  const data = buildVisualizationData();
+  renderSvgChart('chart-catch-size', data.catchPoints, { mode: 'scatter', xLabel: 'date', yLabel: 'size (mm)', xIsDate: true });
+  renderSvgChart('chart-cpue', data.cpuePoints, { mode: 'line', xLabel: 'julian day', yLabel: 'CPUE (crabs/trap)' });
+  renderSvgChart('chart-effort', data.effortPoints, { mode: 'line', xLabel: 'julian day', yLabel: 'number of traps' });
+  renderSvgChart('chart-catch-total', data.totalCatchPoints, { mode: 'line', xLabel: 'julian day', yLabel: 'crab count' });
+}
+
 function goToStep(step) {
   if (step > currentStep && !canEnterStep(step)) return;
   currentStep = step;
@@ -367,6 +588,7 @@ function goToStep(step) {
   progressBar.style.width = `${(step / totalSteps) * 100}%`;
   window.location.hash = `step-${step}`;
   document.querySelector('.step-content').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (step === 3) renderVisualizations();
 }
 
 document.querySelector('#run-quality-checks').addEventListener('change', (event) => {
@@ -390,6 +612,10 @@ document.querySelector('#run-quality-checks').addEventListener('change', (event)
   updateQualityCheckGating();
 });
 document.querySelector('#data-confirmed').addEventListener('change', updateQualityCheckGating);
+
+document.querySelectorAll('.chart-download-button').forEach((button) => button.addEventListener('click', () => {
+  downloadChartAsPng(button.dataset.target, button.dataset.filename);
+}));
 
 document.querySelectorAll('.next-button').forEach((button) => button.addEventListener('click', () => {
   const nextStep = Number(button.dataset.next);
