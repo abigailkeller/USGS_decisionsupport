@@ -162,7 +162,9 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--mint-deep); }
 .chart-panel { margin-top: 38px; }
 .chart-grid .chart-panel { margin-top: 0; }
 .chart-heading { display: flex; align-items: center; justify-content: space-between; gap: 15px; }
-.chart-heading h2 { margin: 0; font-size: 19px; }
+.chart-heading h2 { flex: 1 1 auto; min-width: 0; margin: 0; font-size: 19px; }
+.chart-heading-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+.chart-year-select { padding: 6px 24px 6px 9px; color: var(--ink); font-size: 11px; }
 .chart-download-button { display: grid; flex: 0 0 auto; width: 28px; height: 28px; place-items: center; color: var(--mint-deep); background: white; border: 1px solid var(--line); border-radius: 50%; font-size: 15px; line-height: 1; cursor: pointer; }
 .chart-download-button:hover { background: #eef7ef; }
 .chart-mount { margin-top: 16px; }

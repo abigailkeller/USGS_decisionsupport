@@ -1,6 +1,7 @@
 const totalSteps = 7;
 let currentStep = 1;
 const uploadedData = { catch: null, effort: null };
+let selectedVisualizationYear = 'all';
 
 const stepViews = [...document.querySelectorAll('.step-view')];
 const stepLinks = [...document.querySelectorAll('.step-link')];
@@ -59,7 +60,6 @@ function renderPreview(kind, file, rows) {
       { key: 'date-checked', label: 'Date checked column', pattern: /date.?check|check.?date|date.?set|date.?retrieved|date.?pull/i, dateFormat: true },
       { key: 'trap-type', label: 'Trap type column', pattern: /trap.?type|gear.?type|type/i, help: 'Indicate whether the trap used to catch the crab is a minnow, fukui, or shrimp trap. All other trap types will be filtered out of the dataset' },
       { key: 'trap-id', label: 'Trap ID column', pattern: /trap.?id|trap.?number|trap.?no/i, help: 'Unique ID that links the crab to the trap it was caught in' },
-      { key: 'crab-count', label: 'Crab count column', pattern: /crab.?count|count|number.?crab/i },
     ],
   };
   if (selectionConfig[kind]) {
@@ -68,7 +68,7 @@ function renderPreview(kind, file, rows) {
     if (!selection) {
       selection = document.createElement('div');
       selection.className = 'column-selection';
-      selection.innerHTML = `<p>Select ${kind} columns</p>${fields.map((field) => `<label for="${kind}-${field.key}-column"><span class="column-label">${field.label}${field.help ? `<span class="info-tooltip"><button class="info-tooltip-button" type="button" aria-label="More information about ${field.label}">?</button><span class="info-tooltip-text" role="tooltip">${field.help}</span></span>` : ''}</span><select id="${kind}-${field.key}-column"></select></label>${field.dateFormat ? `<label for="${kind}-${field.key}-format">${field.dateFormatLabel || 'Date format'}<select id="${kind}-${field.key}-format"><option value="">Select a date format</option><option value="MM-DD-YY">MM-DD-YY</option><option value="YYYY-MM-DD">YYYY-MM-DD</option><option value="YYYY/M/D">YYYY/M/D</option><option value="MM/DD/YYYY">MM/DD/YYYY</option><option value="DD-MM-YYYY">DD-MM-YYYY</option></select></label>` : ''}`).join('')}`;
+      selection.innerHTML = `<p>Select ${kind} columns</p>${fields.map((field) => `<label for="${kind}-${field.key}-column"><span class="column-label">${field.label}${field.help ? `<span class="info-tooltip"><button class="info-tooltip-button" type="button" aria-label="More information about ${field.label}">?</button><span class="info-tooltip-text" role="tooltip">${field.help}</span></span>` : ''}</span><select id="${kind}-${field.key}-column"></select></label>${field.dateFormat ? `<label for="${kind}-${field.key}-format">${field.dateFormatLabel || 'Date format'}<select id="${kind}-${field.key}-format"><option value="">Select a date format</option><option value="MM-DD-YY">MM-DD-YY</option><option value="MM/DD/YY">MM/DD/YY</option><option value="YYYY-MM-DD">YYYY-MM-DD</option><option value="YYYY/M/D">YYYY/M/D</option><option value="MM/DD/YYYY">MM/DD/YYYY</option><option value="DD-MM-YYYY">DD-MM-YYYY</option></select></label>` : ''}`).join('')}`;
       card.insertBefore(selection, preview);
     }
     selection.hidden = false;
@@ -120,21 +120,22 @@ function renderPreview(kind, file, rows) {
     removedRows = normalizedRows.filter((row) => !allowedTrapTypes.has(row[trapTypeIndex]));
     removedTrapRows = rows.length - 1 - filteredRows.length;
   }
-  let removedCrabCountRows = 0;
-  const crabCountField = selectionConfig[kind]?.find((field) => field.key === 'crab-count');
-  const crabCountSelect = crabCountField ? card.querySelector(`#${kind}-crab-count-column`) : null;
-  const crabCountIndex = crabCountSelect?.value === '' ? -1 : Number(crabCountSelect?.value);
-  if (crabCountField && crabCountIndex >= 0) {
-    const isValidCrabCount = (row) => {
-      const rawValue = row[crabCountIndex];
-      if (!String(rawValue ?? '').trim()) return false;
-      const count = Number(rawValue);
-      return Number.isFinite(count) && count >= 0;
+  let removedDateRows = 0;
+  const dateField = selectionConfig[kind]?.find((field) => field.dateFormat);
+  const dateSelect = dateField ? card.querySelector(`#${kind}-${dateField.key}-column`) : null;
+  const dateIndex = dateSelect?.value === '' ? -1 : Number(dateSelect?.value);
+  const dateFormatSelect = dateField ? card.querySelector(`#${kind}-${dateField.key}-format`) : null;
+  const dateFormat = dateFormatSelect?.value || '';
+  if (dateField && dateIndex >= 0 && dateFormat) {
+    const isValidDate = (row) => {
+      const rawValue = row[dateIndex];
+      if (!String(rawValue ?? '').trim()) return true;
+      return Boolean(parseDateWithFormat(rawValue, dateFormat));
     };
-    const beforeCrabCountFilter = filteredRows.length;
-    removedRows = removedRows.concat(filteredRows.filter((row) => !isValidCrabCount(row)));
-    filteredRows = filteredRows.filter(isValidCrabCount);
-    removedCrabCountRows = beforeCrabCountFilter - filteredRows.length;
+    const beforeDateFilter = filteredRows.length;
+    removedRows = removedRows.concat(filteredRows.filter((row) => !isValidDate(row)));
+    filteredRows = filteredRows.filter(isValidDate);
+    removedDateRows = beforeDateFilter - filteredRows.length;
   }
   if (uploadedData[kind]) uploadedData[kind].filteredRows = filteredRows;
   const dataRows = filteredRows.map((row) => selectedIndexes.map((index) => row[index] || ''));
@@ -143,7 +144,7 @@ function renderPreview(kind, file, rows) {
   const renderTable = (tableRows) => `<div class="data-preview-scroll"><table><thead><tr>${previewHeaders.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead><tbody>${tableRows.map((row) => `<tr>${selectedIndexes.map((index) => `<td>${escapeHtml(row[index] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
   const removalReasons = [];
   if (removedTrapRows > 0) removalReasons.push(`${removedTrapRows} rows were removed because they were not a minnow, fukui, or shrimp trap.`);
-  if (removedCrabCountRows > 0) removalReasons.push(`${removedCrabCountRows} rows were removed because the crab count was missing, non-numeric, or negative.`);
+  if (removedDateRows > 0) removalReasons.push(`${removedDateRows} rows were removed because their date didn't match the selected format.`);
   const removalMessage = removalReasons.length ? `${removalReasons.map((reason) => `<p class="filter-message">${reason}</p>`).join('')}<label class="removed-rows-toggle"><input type="checkbox" id="show-removed-rows"${card.dataset.showRemoved === 'true' ? ' checked' : ''}> Show removed rows</label>` : '';
   const removedPreview = removedRows.length > 0 && card.dataset.showRemoved === 'true' ? `<p class="removed-rows-heading">Removed rows (${removedRows.length})</p>${renderTable(removedRows)}` : '';
   preview.innerHTML = `${removalMessage}<p>Preview (all ${dataRows.length} rows)</p>${renderTable(filteredRows)}${removedPreview}`;
@@ -157,7 +158,7 @@ function renderPreview(kind, file, rows) {
 
 function allColumnsSelected() {
   if (!uploadedData.catch || !uploadedData.effort) return false;
-  const requiredKeys = { catch: ['date', 'size', 'trap-type', 'trap-id'], effort: ['date-checked', 'trap-type', 'trap-id', 'crab-count'] };
+  const requiredKeys = { catch: ['date', 'size', 'trap-type', 'trap-id'], effort: ['date-checked', 'trap-type', 'trap-id'] };
   return Object.entries(requiredKeys).every(([kind, keys]) => keys.every((key) => selectedColumnIndex(kind, key) !== -1));
 }
 
@@ -194,6 +195,7 @@ function parseDateWithFormat(value, format) {
   if (!trimmed || !format) return null;
   const patterns = {
     'MM-DD-YY': { regex: /^(\d{1,2})-(\d{1,2})-(\d{2})$/, order: ['month', 'day', 'year2'] },
+    'MM/DD/YY': { regex: /^(\d{1,2})\/(\d{1,2})\/(\d{2})$/, order: ['month', 'day', 'year2'] },
     'YYYY-MM-DD': { regex: /^(\d{4})-(\d{1,2})-(\d{1,2})$/, order: ['year', 'month', 'day'] },
     'YYYY/M/D': { regex: /^(\d{4})\/(\d{1,2})\/(\d{1,2})$/, order: ['year', 'month', 'day'] },
     'MM/DD/YYYY': { regex: /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/, order: ['month', 'day', 'year'] },
@@ -229,10 +231,9 @@ function runQualityChecks() {
     dateChecked: selectedColumnIndex('effort', 'date-checked'),
     trapType: selectedColumnIndex('effort', 'trap-type'),
     trapId: selectedColumnIndex('effort', 'trap-id'),
-    crabCount: selectedColumnIndex('effort', 'crab-count'),
   };
   const catchLabels = { date: 'catch date', size: 'catch crab size', trapType: 'catch trap type', trapId: 'catch trap ID' };
-  const effortLabels = { dateChecked: 'effort date checked', trapType: 'effort trap type', trapId: 'effort trap ID', crabCount: 'effort crab count' };
+  const effortLabels = { dateChecked: 'effort date checked', trapType: 'effort trap type', trapId: 'effort trap ID' };
   const missingColumns = [
     ...Object.entries(catchCols).filter(([, index]) => index === -1).map(([key]) => catchLabels[key]),
     ...Object.entries(effortCols).filter(([, index]) => index === -1).map(([key]) => effortLabels[key]),
@@ -244,6 +245,14 @@ function runQualityChecks() {
 
   const catchRows = uploadedData.catch.filteredRows || [];
   const effortRows = uploadedData.effort.filteredRows || [];
+  if (catchRows.length === 0) {
+    results.push({ status: 'error', message: 'No catch rows remain after filtering. Double-check the selected trap type column and date format — if every row was removed, the date format is likely wrong for this file.' });
+    return results;
+  }
+  if (effortRows.length === 0) {
+    results.push({ status: 'error', message: 'No effort rows remain after filtering. Double-check the selected trap type column and date format — if every row was removed, the date format is likely wrong for this file.' });
+    return results;
+  }
   const isBlank = (value) => !String(value ?? '').trim();
   const normalizeTrapId = (value) => String(value ?? '').trim().replace(/\s+/g, ' ');
 
@@ -252,10 +261,10 @@ function runQualityChecks() {
     ? { status: 'pass', message: 'No missing values in the required catch columns.' }
     : { status: 'error', message: `${catchMissing} catch row(s) are missing a date, size, or trap ID.` });
 
-  const effortMissing = effortRows.filter((row) => [effortCols.dateChecked, effortCols.trapId, effortCols.crabCount].some((index) => isBlank(row[index]))).length;
+  const effortMissing = effortRows.filter((row) => [effortCols.dateChecked, effortCols.trapId].some((index) => isBlank(row[index]))).length;
   results.push(effortMissing === 0
     ? { status: 'pass', message: 'No missing values in the required effort columns.' }
-    : { status: 'error', message: `${effortMissing} effort row(s) are missing a date, trap ID, or crab count.` });
+    : { status: 'error', message: `${effortMissing} effort row(s) are missing a date or trap ID.` });
 
   const catchFormat = selectedDateFormat('catch', 'date');
   if (!catchFormat) {
@@ -276,15 +285,6 @@ function runQualityChecks() {
       ? { status: 'pass', message: 'All effort dates match the selected date format.' }
       : { status: 'error', message: `${invalidEffortDates} effort row(s) have a date that does not match the selected format.` });
   }
-
-  const invalidCrabCounts = effortRows.filter((row) => {
-    if (isBlank(row[effortCols.crabCount])) return false;
-    const count = Number(row[effortCols.crabCount]);
-    return !Number.isFinite(count) || count < 0;
-  }).length;
-  results.push(invalidCrabCounts === 0
-    ? { status: 'pass', message: 'All effort crab counts are valid, non-negative numbers.' }
-    : { status: 'error', message: `${invalidCrabCounts} effort row(s) have a crab count that is missing, non-numeric, or negative.` });
 
   const dateKey = (date) => `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
   const effortDeployments = new Set(effortRows.map((row) => {
@@ -314,14 +314,6 @@ function runQualityChecks() {
     ? { status: 'pass', message: 'No duplicate trap deployments found in the effort data.' }
     : { status: 'warning', message: `${duplicateDeployments} effort row(s) repeat the same trap ID and date checked.` });
 
-  const totalCrabCount = effortRows.reduce((sum, row) => {
-    const count = Number(row[effortCols.crabCount]);
-    return sum + (Number.isFinite(count) && count >= 0 ? count : 0);
-  }, 0);
-  results.push(totalCrabCount === catchRows.length
-    ? { status: 'pass', message: 'The sum of the effort crab counts matches the number of catch rows.' }
-    : { status: 'warning', message: `The sum of the effort crab counts (${totalCrabCount}) does not match the number of catch rows (${catchRows.length}).` });
-
   return results;
 }
 
@@ -346,7 +338,6 @@ function handleFile(kind, file) {
 function canEnterStep(step) {
   if (step <= 2) return true;
   if (!uploadedData.catch || !uploadedData.effort || !document.querySelector('#data-confirmed').checked) return false;
-  if (step >= 4 && !document.querySelector('[data-view="3"] .step-check').checked) return false;
   if (step >= 5 && !document.querySelector('[data-view="4"] .step-check').checked) return false;
   if (step >= 7 && document.querySelector('#training-next').disabled) return false;
   return true;
@@ -442,14 +433,34 @@ function biweekBreakFor(date) {
   return index === -1 ? null : BIWEEK_BREAKS[index];
 }
 
+const AGGREGATE_REFERENCE_YEAR = 2001;
+
+function getAvailableYears() {
+  const catchCols = { date: selectedColumnIndex('catch', 'date') };
+  const effortCols = { dateChecked: selectedColumnIndex('effort', 'date-checked') };
+  const catchFormat = selectedDateFormat('catch', 'date');
+  const effortFormat = selectedDateFormat('effort', 'date-checked');
+  const years = new Set();
+  (uploadedData.catch?.filteredRows || []).forEach((row) => {
+    const date = catchFormat ? parseDateWithFormat(row[catchCols.date], catchFormat) : null;
+    if (date) years.add(date.getFullYear());
+  });
+  (uploadedData.effort?.filteredRows || []).forEach((row) => {
+    const date = effortFormat ? parseDateWithFormat(row[effortCols.dateChecked], effortFormat) : null;
+    if (date) years.add(date.getFullYear());
+  });
+  return [...years].sort((a, b) => a - b);
+}
+
 function buildVisualizationData() {
   const catchCols = { date: selectedColumnIndex('catch', 'date'), size: selectedColumnIndex('catch', 'size'), trapType: selectedColumnIndex('catch', 'trap-type') };
-  const effortCols = { dateChecked: selectedColumnIndex('effort', 'date-checked'), trapType: selectedColumnIndex('effort', 'trap-type'), crabCount: selectedColumnIndex('effort', 'crab-count') };
+  const effortCols = { dateChecked: selectedColumnIndex('effort', 'date-checked'), trapType: selectedColumnIndex('effort', 'trap-type') };
   const catchFormat = selectedDateFormat('catch', 'date');
   const effortFormat = selectedDateFormat('effort', 'date-checked');
   const catchRows = uploadedData.catch?.filteredRows || [];
   const effortRows = uploadedData.effort?.filteredRows || [];
   const normalizeTrapType = (value) => String(value ?? '').trim().toLowerCase();
+  const isAggregate = selectedVisualizationYear === 'all';
 
   const catchPoints = catchRows.map((row) => {
     const date = catchFormat ? parseDateWithFormat(row[catchCols.date], catchFormat) : null;
@@ -458,27 +469,50 @@ function buildVisualizationData() {
     return { x: date.getTime(), y: size, series: normalizeTrapType(row[catchCols.trapType]) };
   }).filter(Boolean);
 
+  const catchCounts = new Map();
+  catchPoints.forEach((point) => {
+    const date = new Date(point.x);
+    const jday = biweekBreakFor(date);
+    if (jday === null) return;
+    const key = `${date.getFullYear()}|${jday}|${point.series}`;
+    catchCounts.set(key, (catchCounts.get(key) || 0) + 1);
+  });
+
   const groups = new Map();
   effortRows.forEach((row) => {
     const date = effortFormat ? parseDateWithFormat(row[effortCols.dateChecked], effortFormat) : null;
-    const crabCount = Number(row[effortCols.crabCount]);
-    if (!date || !Number.isFinite(crabCount)) return;
+    if (!date) return;
     const jday = biweekBreakFor(date);
     if (jday === null) return;
+    const year = date.getFullYear();
     const trapType = normalizeTrapType(row[effortCols.trapType]);
-    const key = `${jday}|${trapType}`;
-    if (!groups.has(key)) groups.set(key, { jday, trapType, n: 0, totalCatch: 0 });
-    const group = groups.get(key);
-    group.n += 1;
-    group.totalCatch += crabCount;
+    const key = `${year}|${jday}|${trapType}`;
+    if (!groups.has(key)) groups.set(key, { year, jday, trapType, n: 0 });
+    groups.get(key).n += 1;
   });
-  const effortSummary = [...groups.values()];
+  let effortSummary = [...groups.values()].map((g) => ({ ...g, totalCatch: catchCounts.get(`${g.year}|${g.jday}|${g.trapType}`) || 0 }));
+
+  if (isAggregate) {
+    const aggregated = new Map();
+    effortSummary.forEach((g) => {
+      const key = `${g.jday}|${g.trapType}`;
+      if (!aggregated.has(key)) aggregated.set(key, { jday: g.jday, trapType: g.trapType, n: 0, totalCatch: 0 });
+      const a = aggregated.get(key);
+      a.n += g.n;
+      a.totalCatch += g.totalCatch;
+    });
+    effortSummary = [...aggregated.values()];
+  } else {
+    effortSummary = effortSummary.filter((g) => g.year === selectedVisualizationYear);
+  }
+
+  const xDateFor = (g) => new Date(isAggregate ? AGGREGATE_REFERENCE_YEAR : g.year, 0, g.jday).getTime();
 
   return {
     catchPoints,
-    cpuePoints: effortSummary.map((g) => ({ x: g.jday, y: g.n > 0 ? g.totalCatch / g.n : 0, series: g.trapType })),
-    effortPoints: effortSummary.map((g) => ({ x: g.jday, y: g.n, series: g.trapType })),
-    totalCatchPoints: effortSummary.map((g) => ({ x: g.jday, y: g.totalCatch, series: g.trapType })),
+    cpuePoints: effortSummary.map((g) => ({ x: xDateFor(g), y: g.n > 0 ? g.totalCatch / g.n : 0, series: g.trapType })),
+    effortPoints: effortSummary.map((g) => ({ x: xDateFor(g), y: g.n, series: g.trapType })),
+    totalCatchPoints: effortSummary.map((g) => ({ x: xDateFor(g), y: g.totalCatch, series: g.trapType })),
   };
 }
 
@@ -497,6 +531,10 @@ function formatDateShort(date) {
   return `${MONTH_ABBR[date.getMonth()]} ${date.getDate()}`;
 }
 
+function formatDateShortWithYear(date) {
+  return `${MONTH_ABBR[date.getMonth()]} ${date.getDate()} '${String(date.getFullYear()).slice(-2)}`;
+}
+
 function renderSvgChart(mountId, points, opts) {
   const mount = document.querySelector(`#${mountId}`);
   if (!mount) return;
@@ -506,7 +544,7 @@ function renderSvgChart(mountId, points, opts) {
   const plotHeight = 220;
   const legendHeight = 26;
   const height = plotHeight + legendHeight;
-  const margin = { top: 12, right: 16, bottom: 32, left: 46 };
+  const margin = { top: 12, right: opts.dateAxisFormat === 'withYear' ? 30 : 16, bottom: 32, left: 46 };
   const innerWidth = width - margin.left - margin.right;
   const innerHeight = plotHeight - margin.top - margin.bottom;
   const lineColor = cssVar('--line');
@@ -525,7 +563,7 @@ function renderSvgChart(mountId, points, opts) {
 
   const gridLines = yTicks.map((tick) => `<line x1="${margin.left}" x2="${width - margin.right}" y1="${yScale(tick)}" y2="${yScale(tick)}" stroke="${lineColor}" stroke-width="1" />`).join('');
   const yAxisLabels = yTicks.map((tick) => `<text x="${margin.left - 8}" y="${yScale(tick) + 3}" text-anchor="end" font-size="9" fill="${mutedColor}">${formatAxisNumber(tick)}</text>`).join('');
-  const xAxisLabels = xTicks.map((tick) => `<text x="${xScale(tick)}" y="${plotHeight - margin.bottom + 16}" text-anchor="middle" font-size="9" fill="${mutedColor}">${opts.xIsDate ? formatDateShort(new Date(tick)) : formatAxisNumber(tick)}</text>`).join('');
+  const xAxisLabels = xTicks.map((tick) => `<text x="${xScale(tick)}" y="${plotHeight - margin.bottom + 16}" text-anchor="middle" font-size="9" fill="${mutedColor}">${opts.xIsDate ? (opts.dateAxisFormat === 'withYear' ? formatDateShortWithYear(new Date(tick)) : formatDateShort(new Date(tick))) : formatAxisNumber(tick)}</text>`).join('');
 
   let seriesMarkup = '';
   [...seriesMap.entries()].sort(([a], [b]) => a.localeCompare(b)).forEach(([series, rows]) => {
@@ -535,7 +573,7 @@ function renderSvgChart(mountId, points, opts) {
       seriesMarkup += `<polyline points="${sorted.map((p) => `${xScale(p.x)},${yScale(p.y)}`).join(' ')}" fill="none" stroke="${color}" stroke-width="2" />`;
     }
     seriesMarkup += sorted.map((p) => {
-      const xDisplay = opts.xIsDate ? formatDateLong(new Date(p.x)) : formatAxisNumber(p.x);
+      const xDisplay = opts.xIsDate ? (opts.tooltipDateFormat === 'short' ? formatDateShort(new Date(p.x)) : formatDateLong(new Date(p.x))) : formatAxisNumber(p.x);
       const tooltip = `${series}\n${opts.xLabel}: ${xDisplay}\n${opts.yLabel}: ${formatTooltipNumber(p.y)}`;
       return `<circle class="chart-point" cx="${xScale(p.x)}" cy="${yScale(p.y)}" r="4" fill="${color}" data-tooltip="${escapeHtml(tooltip)}"></circle>`;
     }).join('');
@@ -565,12 +603,24 @@ function renderSvgChart(mountId, points, opts) {
   attachChartInteractions(mount);
 }
 
+function populateYearSelects() {
+  const years = getAvailableYears();
+  if (selectedVisualizationYear !== 'all' && !years.includes(selectedVisualizationYear)) selectedVisualizationYear = 'all';
+  const optionsMarkup = ['<option value="all">All years</option>', ...years.map((year) => `<option value="${year}">${year}</option>`)].join('');
+  document.querySelectorAll('.chart-year-select').forEach((select) => {
+    select.innerHTML = optionsMarkup;
+    select.value = String(selectedVisualizationYear);
+  });
+}
+
 function renderVisualizations() {
+  populateYearSelects();
   const data = buildVisualizationData();
-  renderSvgChart('chart-catch-size', data.catchPoints, { mode: 'scatter', xLabel: 'date', yLabel: 'size (mm)', xIsDate: true });
-  renderSvgChart('chart-cpue', data.cpuePoints, { mode: 'line', xLabel: 'julian day', yLabel: 'CPUE (crabs/trap)' });
-  renderSvgChart('chart-effort', data.effortPoints, { mode: 'line', xLabel: 'julian day', yLabel: 'number of traps' });
-  renderSvgChart('chart-catch-total', data.totalCatchPoints, { mode: 'line', xLabel: 'julian day', yLabel: 'crab count' });
+  const tooltipDateFormat = selectedVisualizationYear === 'all' ? 'short' : 'long';
+  renderSvgChart('chart-catch-size', data.catchPoints, { mode: 'scatter', xLabel: 'date', yLabel: 'size (mm)', xIsDate: true, dateAxisFormat: 'withYear' });
+  renderSvgChart('chart-cpue', data.cpuePoints, { mode: 'line', xLabel: 'date', yLabel: 'CPUE (crabs/trap)', xIsDate: true, tooltipDateFormat });
+  renderSvgChart('chart-effort', data.effortPoints, { mode: 'line', xLabel: 'date', yLabel: 'number of traps', xIsDate: true, tooltipDateFormat });
+  renderSvgChart('chart-catch-total', data.totalCatchPoints, { mode: 'line', xLabel: 'date', yLabel: 'crab count', xIsDate: true, tooltipDateFormat });
 }
 
 function goToStep(step) {
@@ -615,6 +665,11 @@ document.querySelector('#data-confirmed').addEventListener('change', updateQuali
 
 document.querySelectorAll('.chart-download-button').forEach((button) => button.addEventListener('click', () => {
   downloadChartAsPng(button.dataset.target, button.dataset.filename);
+}));
+
+document.querySelectorAll('.chart-year-select').forEach((select) => select.addEventListener('change', (event) => {
+  selectedVisualizationYear = event.target.value === 'all' ? 'all' : Number(event.target.value);
+  renderVisualizations();
 }));
 
 document.querySelectorAll('.next-button').forEach((button) => button.addEventListener('click', () => {
