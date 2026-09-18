@@ -8,9 +8,12 @@ C <- readRDS("sample_data/model_data/counts.rds")
 C_T <- readRDS("sample_data/model_data/ncap.rds")
 
 # read in time series constants
-index <- readRDS("sample_data/model_data/index.rds")
-D <- readRDS("sample_data/model_data/index_frac.rds")
-totalt <- readRDS("sample_data/model_data/totalt.rds")
+n_occ <- readRDS("sample_data/model_data/n_occ.rds")
+n_year <- readRDS("sample_data/model_data/n_year.rds")
+n_pair <- readRDS("sample_data/model_data/n_pair.rds")
+occ_t <- readRDS("sample_data/model_data/occ_t.rds")
+occ_y <- readRDS("sample_data/model_data/occ_y.rds")
+D <- readRDS("sample_data/model_data/D.rds")
 totalo <- readRDS("sample_data/model_data/totalo.rds")
 soak_days <- readRDS("sample_data/model_data/soak_days.rds")
 m_index <- readRDS("sample_data/model_data/m_index.rds")
@@ -18,7 +21,8 @@ f_index <- readRDS("sample_data/model_data/f_index.rds")
 s_index <- readRDS("sample_data/model_data/s_index.rds")
 
 # get recruit intro
-recruit_intro <- 1 * (index == 9)
+recruit_intro <- rep(0, length(D))
+recruit_intro[7] <- 1
 
 # read in IPM constants
 b <- readRDS("sample_data/model_data/b.rds")
@@ -40,62 +44,16 @@ model_code <- nimbleCode({
   
   # ---- per-year population dynamics, reusing the shared kernels ----
   for (y in 1:n_year) {
-    N_init[y, 1:n_size] <- get_init_adult(log_mu_A, sigma_A,
-                                          lower[1:n_size], upper[1:n_size],
-                                          lambda_A[y])
+    N[1, y, 1:n_size] <- get_init_adult(log_mu_A, sigma_A,
+                                        lower[1:n_size], upper[1:n_size],
+                                        lambda_A[y])
     
     for (t in 1:(n_occ - 1)) {
       N[t + 1, y, 1:n_size] <- K[t, 1:n_size, 1:n_size] %*%
         (N[t, y, 1:n_size] - C_T[t, y, 1:n_size]) +
-        recruit_intro[t, y] * R[y, 1:n_size]
+        recruit_intro[t] * R[y, 1:n_size]
     }
   }
-  
-  ######
-  ######
-  ######
-  
-  # # intra-annual change
-  # for (y in 1:n_year) {
-  #   for (t in 1:(totalt[y] - 1)) {
-  #     
-  #     ## project
-  #     N[t + 1, y, 1:n_size] <- get_kernel(xinf, gk, sigma_G,
-  #                                         A, ds, D[t, y],
-  #                                         D[t + 1, y], n_size, pi,
-  #                                         x[1:n_size], lower[1:n_size],
-  #                                         upper[1:n_size],
-  #                                         S[t + 1, y, 1:n_size])  %*%
-  #       (N[t, y, 1:n_size] - C_T[t, y, 1:n_size]) +
-  #       recruit_intro[t, y] * R[y, 1:n_size] # introduce recruits
-  #     
-  #     ## natural survival
-  #     S[t + 1, y, 1:n_size] <- survival(alpha, beta, x[1:n_size], D[t, y],
-  #                                       D[t + 1, y])
-  #     
-  #   }
-  # }
-  
-  #####################################################
-  # Initial population density and annual recruitment #
-  #####################################################
-  
-  # ## get initial size-structured abundance of adults
-  # for (y in 1:n_year) {
-  #   N_init[y, 1:n_size] <- get_init_adult(log_mu_A, sigma_A,
-  #                                         lower[1:n_size], upper[1:n_size], 
-  #                                         lambda_A[y])
-  #   
-  #   # project to first observed time period - year 1
-  #   N[1, y, 1:n_size] <- get_kernel(xinf, gk, sigma_G, A,
-  #                                   ds, 0, D[1, y], n_size, pi,
-  #                                   x[1:n_size], lower[1:n_size],
-  #                                   upper[1:n_size], S[1, 1, 1:n_size]) %*%
-  #     N_init[y, 1:n_size]
-  #   
-  #   # natural survival
-  #   S[1, y, 1:n_size] <- survival(alpha, beta, x[1:n_size], 0, D[1, y])
-  # }
   
   ## annual abundance of recruits and adults
   for (m in 1:n_year) {
@@ -115,11 +73,6 @@ model_code <- nimbleCode({
   # Observation model #
   #####################
   #####################
-  
-  # ---- no removal on unsampled occasions ----
-  for (j in 1:n_un) {
-    C_T[un_t[j], un_y[j], 1:n_size] <- zeros[1:n_size]
-  }
   
   # ---- observation model: one loop over sampled (t, y) pairs ----
   for (j in 1:n_pair) {
@@ -148,46 +101,6 @@ model_code <- nimbleCode({
     }
   }
   
-  # for (y in 1:n_year) {
-  #   for (t in 1:totalt[y]) {
-  #     for (k in 1:n_size) {
-  #       
-  #       # Equation 15
-  #       ## binomial distribution with total crabs removed, C_T
-  #       C_T[t, y, k] ~ dbinom(size = round(N[t, y, k]), prob = p[t, y, k])
-  #       
-  #       # Equation 16
-  #       ## dirichlet-multinomial mixture, conditional probability of capture
-  #       alpha_D[t, 1:totalo[t, y], y, k] <- p_C[t, 1:totalo[t, y],
-  #                                               y, k] * n_p_dir
-  #       C[t, y, 1:totalo[t, y], 
-  #         k] ~ ddirchmulti(alpha = alpha_D[t, 1:totalo[t, y], y, k],
-  #                          size = C_T[t, y, k])
-  #     }
-  #     
-  #     # Equations 17 - 19
-  #     ## calculate hazard rate
-  #     hazard[t, 1:totalo[t, y], y, 1:n_size] <- calc_hazard(
-  #       totalo[t, y], n_size, h_F_max, h_F_k, h_F_0, h_S_max, h_S_k, h_S_0,
-  #       h_M_max, h_M_A, h_M_sigma, f_index[t, y, 1:totalo[t, y]],
-  #       s_index[t, y, 1:totalo[t, y]], m_index[t, y, 1:totalo[t, y]],
-  #       soak_days[t, y, 1:totalo[t, y]], x[1:n_size]
-  #     )
-  #     
-  #     # Equation 20
-  #     ## total capture probability
-  #     p[t, y, 1:n_size] <- calc_prob(totalo[t, y], n_size,
-  #                                    hazard[t, 1:totalo[t, y], y, 1:n_size])
-  #     
-  #     # mean conditional probability of capture
-  #     p_C[t, 1:totalo[t, y],
-  #         y, 1:n_size] <- calc_cond_prob(totalo[t, y], n_size,
-  #                                        hazard[t, 1:totalo[t, y],
-  #                                               y, 1:n_size])
-  #     
-  #   }
-  # }
-  
   
   #######################
   # Prior distributions #
@@ -199,12 +112,11 @@ model_code <- nimbleCode({
   
   # growth rate
   gk ~ dnorm(1.209, sd = 0.075)
+  gk <- 1.209
   # amplitude of growth oscillations
   A ~ dnorm(1.538, sd = 0.162)
   # inflection point of growth oscillations
   ds ~ dnorm(0.2437, sd = 0.0197)
-  # age organism has 0 size
-  d0 ~ dnorm(0.1962, sd = 0.0289)
   # asymptotic size
   xinf ~ dnorm(80.5, sd = 0.91)
   # growth error
@@ -276,9 +188,15 @@ model_code <- nimbleCode({
 # bundle up data and constants
 constants <- list(
   # number of years
-  n_year = dim(C)[2],
-  # number of time periods in each year
-  totalt = totalt,
+  n_year = n_year,
+  # number of trap occasions (t)
+  n_occ = n_occ,
+  # number of year/trapping occasion pairs
+  n_pair = n_pair,
+  # t associated with pairs
+  occ_t = occ_t,
+  # y associated with pairs
+  occ_y = occ_y,
   # number of trap obs in year y, time t
   totalo = totalo,
   # number of sizes in IPM mesh
@@ -295,7 +213,7 @@ constants <- list(
   s_index = s_index,
   # midpoints in IPM mesh
   x = x,
-  # calendar date indices (fraction of year) in time t, year i
+  # calendar date indices (fraction of year) in time t
   D = D,
   # number of soak days for each trap at time t, trap j, year i
   soak_days = soak_days,
@@ -314,18 +232,17 @@ data <- list(
 # initial values
 inits <- function() {
   list(
-    h_M_max = runif(1, 0.0001, 0.0008), h_M_A = runif(1, 35, 60), 
-    h_M_sigma = runif(1, 5, 8), h_F_max = runif(1, 0.0001, 0.0008), 
-    h_F_k = runif(1, 0.1, 0.5), h_F_0 = runif(1, 30, 60),
-    h_S_max = runif(1, 0.001, 0.005), h_S_k = runif(1, 0.1, 0.5), 
-    h_S_0 = runif(1, 30, 60), ro_dir = 0.01, alpha = 0.1, beta = 0.001,
-    gk = 1, xinf = 77, A = 0.79, ds = 0.3, sigma_G = 2.5, 
+    h_M_max = 0.0003912, h_M_A = 45.12, 
+    h_M_sigma = 6.449, h_F_max = 0.0001784, 
+    h_F_k = 0.4977, h_F_0 = 35.34,
+    h_S_max = 0.003937, h_S_k = 0.3437, 
+    h_S_0 = 46.41, ro_dir = 0.01, alpha = 9.498, beta = 0.00178,
+    gk = 1.2, xinf = 81, A = 1.5, ds = 0.24, sigma_G = 2.8, 
     sigma_R = 1, mu_R = 20, log_mu_A = 4, sigma_A = 0.2,
-    lambda_A = runif(dim(C)[2], 3000, 10000), 
-    lambda_R = runif(dim(C)[2], 3000, 10000), 
+    lambda_A = runif(n_year, 3000, 10000), 
+    lambda_R = runif(n_year, 3000, 10000), 
     mu_lambda_A = log(500), mu_lambda_R = log(500),
-    sigma_lambda_A = 0.3, sigma_lambda_R = 0.3,
-    d0 = runif(1, -0.5, 0)
+    sigma_lambda_A = 0.3, sigma_lambda_R = 0.3
   )
 }
 
@@ -338,7 +255,7 @@ cl <- makeCluster(4)
 
 set.seed(10120)
 
-clusterExport(cl, c("model_code", "inits", "data", "constants"))
+clusterExport(cl, c("model_code", "inits", "data", "constants", "n_year"))
 
 # Create a function with all the needed code
 out <- clusterEvalQ(cl, {
@@ -599,7 +516,8 @@ out <- clusterEvalQ(cl, {
     monitors = c("log_mu_A", "sigma_A", 
                  "mu_lambda_A", "sigma_lambda_A",
                  "mu_lambda_R", "sigma_lambda_R",
-                 "lambda_R", "lambda_A"),
+                 "lambda_R", "lambda_A",
+                 "h_M_max", "h_F_max", "h_S_max"),
     useConjugacy = FALSE, enableWAIC = TRUE)
   
   # build MCMC
@@ -612,7 +530,7 @@ out <- clusterEvalQ(cl, {
   cmodel_mcmc <- compileNimble(myMCMC, project = myModel)
   
   # run MCMC
-  cmodel_mcmc$run(10000, thin = 10,
+  cmodel_mcmc$run(100, thin = 1,
                   reset = FALSE)
   
   samples <- as.mcmc(as.matrix(cmodel_mcmc$mvSamples))
