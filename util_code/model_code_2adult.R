@@ -44,9 +44,12 @@ model_code <- nimbleCode({
   
   # ---- per-year population dynamics, reusing the shared kernels ----
   for (y in 1:n_year) {
-    N[1, y, 1:n_size] <- get_init_adult(log_mu_A, sigma_A,
+    N[1, y, 1:n_size] <- get_init_adult(log_mu_A1, sigma_A1,
                                         lower[1:n_size], upper[1:n_size],
-                                        lambda_A[y])
+                                        lambda_A1[y]) +
+      get_init_adult(log_mu_A2p, sigma_A2p,
+                     lower[1:n_size], upper[1:n_size],
+                     lambda_A2p[y])
     
     for (t in 1:(n_occ - 1)) {
       N[t + 1, y, 1:n_size] <- K[t, 1:n_size, 1:n_size] %*%
@@ -58,7 +61,8 @@ model_code <- nimbleCode({
   ## annual abundance of recruits and adults
   for (m in 1:n_year) {
     lambda_R[m] ~ dlnorm(mu_lambda_R, sdlog = sigma_lambda_R)
-    lambda_A[m] ~ dlnorm(mu_lambda_A, sdlog = sigma_lambda_A)
+    lambda_A1[m] ~ dlnorm(mu_lambda_A1, sdlog = sigma_lambda_A1)
+    lambda_A2p[m] ~ dlnorm(mu_lambda_A2p, sdlog = sigma_lambda_A2p)
   }
   
   ## annual size distribution of recruits
@@ -182,9 +186,14 @@ model_code <- nimbleCode({
   # initial population density and annual recruitment
   ##
   
-  # initial adult size (lognormal mean and sd)
-  log_mu_A ~ dunif(3.25, 4.5)
-  sigma_A ~ dunif(0.1, 1)
+  # initial adult size - 1year (lognormal mean and sd)
+  log_mu_A1 ~ dunif(3.25, 4.5)
+  sigma_A1 ~ dunif(0.1, 1)
+  
+  # initial adult size - 1year (lognormal mean and sd)
+  log_mu_A2p <- log_mu_A1 + adult_diff
+  adult_diff  ~ dunif(0, 2)
+  sigma_A2p ~ dunif(0.1, 1)
   
   # initial recruit size (mean and sd)
   # mu_R ~ dnorm(0.2156, sd = 0.0191)
@@ -196,9 +205,13 @@ model_code <- nimbleCode({
   mu_lambda_R ~ dunif(-50, 50)
   sigma_lambda_R ~ dunif(0, 10000)
   
-  # abundance of recruits (lognormal mean and sd)
-  mu_lambda_A ~ dunif(-50, 50)
-  sigma_lambda_A ~ dunif(0, 10000)
+  # abundance of adults - 1year (lognormal mean and sd)
+  mu_lambda_A1 ~ dunif(-50, 50)
+  sigma_lambda_A1 ~ dunif(0, 10000)
+  
+  # abundance of adults - 2plus (lognormal mean and sd)
+  mu_lambda_A2p ~ dunif(-50, 50)
+  sigma_lambda_A2p ~ dunif(0, 10000)
   
   
 })
@@ -257,11 +270,13 @@ inits <- function() {
     #h_S_0 = 46.41, ro_dir = 0.01, alpha = 9.498, beta = 0.00178,
     #gk = 1.2, xinf = 81, A = 1.5, ds = 0.24, sigma_G = 2.8, 
     #sigma_R = 1, mu_R = 20, 
-    log_mu_A = 4, sigma_A = 0.2,
-    lambda_A = runif(n_year, 3000, 10000), 
+    adult_diff = 1, sigma_A2p = 0.2,
+    log_mu_A1 = 3.75, sigma_A1 = 0.2,
+    lambda_A1 = runif(n_year, 3000, 10000), 
+    lambda_A2p = runif(n_year, 3000, 10000), 
     lambda_R = runif(n_year, 3000, 10000), 
-    mu_lambda_A = log(500), mu_lambda_R = log(500),
-    sigma_lambda_A = 0.3, sigma_lambda_R = 0.3
+    mu_lambda_A1 = log(500), mu_lambda_A2p = log(500), mu_lambda_R = log(500),
+    sigma_lambda_A1 = 0.3, sigma_lambda_A2p = 0.3, sigma_lambda_R = 0.3
   )
 }
 
@@ -532,10 +547,10 @@ out <- clusterEvalQ(cl, {
   # build the MCMC
   mcmcConf_myModel <- configureMCMC(
     myModel,
-    monitors = c("mu_lambda_A", "sigma_lambda_A",
+    monitors = c("mu_lambda_A1", "sigma_lambda_A1",
+                 "mu_lambda_A2p", "sigma_lambda_A2p",
                  "mu_lambda_R", "sigma_lambda_R",
-                 "lambda_R", "lambda_A",
-                 "log_mu_A", "sigma_A"),
+                 "lambda_R", "lambda_A1", "lambda_A2p"),
     useConjugacy = FALSE, enableWAIC = TRUE)
   
   # build MCMC
@@ -564,11 +579,6 @@ out_sub <- list(out[[1]][sequence, ], out[[2]][sequence, ],
                 out[[3]][sequence, ], out[[4]][sequence, ])
 
 # save samples
-saveRDS(out_sub, "sample_data/posterior_samples/onepulse.rds")
+saveRDS(out_sub, "sample_data/posterior_samples/twoadults.rds")
 
 stopCluster(cl)
-
-# calculate WAIC
-samples_mat <- rbind(out_sub[[1]], out_sub[[2]],
-                     out_sub[[3]], out_sub[[4]])
-calculateWAIC(samples_mat, CmyModel)
