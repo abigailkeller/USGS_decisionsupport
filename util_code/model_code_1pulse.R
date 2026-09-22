@@ -131,8 +131,8 @@ model_code <- nimbleCode({
   ##
   
   # minnow max. hazard rate
-  # h_M_max ~ dnorm(0.0003912, sd = 0.0000617)
-  h_M_max <- 0.0003912
+  h_M_max ~ dnorm(0.0003912, sd = 0.0000617)
+  # h_M_max <- 0.0003912
   # minnow max. size of capture
   # h_M_A ~ dnorm(45.12, sd = 0.67)
   h_M_A <- 45.12
@@ -140,8 +140,8 @@ model_code <- nimbleCode({
   # h_M_sigma ~ dnorm(6.449, sd = 0.376)
   h_M_sigma <- 6.449
   # fukui max. hazard rate
-  # h_F_max ~ dnorm(0.0001784, sd = 0.000015)
-  h_F_max <- 0.0001784
+  h_F_max ~ dnorm(0.0001784, sd = 0.000015)
+  # h_F_max <- 0.0001784
   # fukui k of logistic size selectivity curve
   # h_F_k ~ dnorm(0.4977, sd = 0.1878)
   h_F_k <- 0.4977
@@ -149,8 +149,8 @@ model_code <- nimbleCode({
   # h_F_0 ~ dnorm(35.34, sd = 1.98)
   h_F_0 <- 35.34
   # shrimp max. hazard rate
-  # h_S_max ~ dnorm(0.003937, sd = 0.0004)
-  h_S_max <- 0.003937
+  h_S_max ~ dnorm(0.003937, sd = 0.0004)
+  # h_S_max <- 0.003937
   # shrimp k of logistic size selectivity curve
   # h_S_k ~ dnorm(0.3437, sd = 0.0543)
   h_S_k <- 0.3437
@@ -250,10 +250,13 @@ data <- list(
 # initial values
 inits <- function() {
   list(
-    #h_M_max = 0.0003912, h_M_A = 45.12, 
-    #h_M_sigma = 6.449, h_F_max = 0.0001784, 
+    h_M_max = 0.0003912, 
+    # h_M_A = 45.12, 
+    #h_M_sigma = 6.449,
+    h_F_max = 0.0001784, 
     #h_F_k = 0.4977, h_F_0 = 35.34,
-    #h_S_max = 0.003937, h_S_k = 0.3437, 
+    h_S_max = 0.003937, 
+    # h_S_k = 0.3437, 
     #h_S_0 = 46.41, ro_dir = 0.01, alpha = 9.498, beta = 0.00178,
     #gk = 1.2, xinf = 81, A = 1.5, ds = 0.24, sigma_G = 2.8, 
     #sigma_R = 1, mu_R = 20, 
@@ -535,7 +538,8 @@ out <- clusterEvalQ(cl, {
     monitors = c("mu_lambda_A", "sigma_lambda_A",
                  "mu_lambda_R", "sigma_lambda_R",
                  "lambda_R", "lambda_A",
-                 "log_mu_A", "sigma_A"),
+                 "log_mu_A", "sigma_A",
+                 "h_M_max", "h_F_max", "h_S_max"),
     useConjugacy = FALSE, enableWAIC = TRUE)
   
   # build MCMC
@@ -548,7 +552,7 @@ out <- clusterEvalQ(cl, {
   cmodel_mcmc <- compileNimble(myMCMC, project = myModel)
   
   # run MCMC
-  cmodel_mcmc$run(100000, thin = 10,
+  cmodel_mcmc$run(50000, thin = 10,
                   reset = TRUE)
   
   samples <- as.mcmc(as.matrix(cmodel_mcmc$mvSamples))
@@ -558,17 +562,17 @@ out <- clusterEvalQ(cl, {
 
 # discard burnin
 lower <- 2000
-upper <- 10000
+upper <- 5000
 sequence <- seq(lower, upper, 1)
 out_sub <- list(out[[1]][sequence, ], out[[2]][sequence, ],
                 out[[3]][sequence, ], out[[4]][sequence, ])
 
 # save samples
-saveRDS(out_sub, "sample_data/posterior_samples/onepulse.rds")
+saveRDS(out_sub, "sample_data/posterior_samples/onepulse_20260921_short.rds")
 
 stopCluster(cl)
 
 # calculate WAIC
-samples_mat <- rbind(out_sub[[1]], out_sub[[2]],
-                     out_sub[[3]], out_sub[[4]])
-calculateWAIC(samples_mat, CmyModel)
+# samples_mat <- rbind(out_sub[[1]], out_sub[[2]],
+#                      out_sub[[3]], out_sub[[4]])
+# calculateWAIC(samples_mat, CmyModel)
