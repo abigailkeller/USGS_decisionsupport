@@ -1,5 +1,13 @@
 library(tidyverse)
 
+# command-line args: <catch_csv> <effort_csv> <output_dir>
+# falls back to the bundled sample data when run with no args (unchanged
+# standalone behavior)
+args <- commandArgs(trailingOnly = TRUE)
+catch_path <- if (length(args) >= 1) args[1] else "sample_data/draytonharbor_catch.csv"
+effort_path <- if (length(args) >= 2) args[2] else "sample_data/draytonharbor_effort.csv"
+output_dir <- if (length(args) >= 3) args[3] else "data/model_data"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
 # create parameters for IPM mesh
 min.size <- 0
@@ -18,8 +26,8 @@ biweek <- c(59, 76, 91, 106, 121, 137, 152, 167, 182, 198, 213, 229,
             244, 259, 274, 290, 305, 320, 335)
 
 # read in sample data
-catch <- read.csv("sample_data/draytonharbor_catch.csv")
-effort <- read.csv("sample_data/draytonharbor_effort.csv")
+catch <- read.csv(catch_path)
+effort <- read.csv(effort_path)
 
 # date formats
 date_format_catch <- "%m/%d/%Y"
@@ -118,100 +126,91 @@ effort2 <- left_join(effort2, catch_total,
                      by = c("ID", "trap_type", "julian_day")) %>%
   replace(is.na(.), 0)
 
-# create counts
-biweeks <- sort(unique(effort2$biweek))
-years <- sort(unique(effort2$year))
+# global occasion axis: every biweek sampled in ANY year
+occasions <- sort(unique(effort2$biweek))
+n_occ     <- length(occasions)
+years     <- sort(unique(effort2$year))
+n_year    <- length(years)
 
-counts <- array(data = NA,
-                dim = c(length(biweeks),
-                        length(years),
-                        max(effort2$trap_int),
-                        length(size_colnames)),
-                dimnames = list(biweeks, years, NULL, size_colnames))
+effort2$occ  <- match(effort2$biweek, occasions)
+effort2$yidx <- match(effort2$year,   years)
 
-for (i in seq_along(biweeks)) {
-  for (t in seq_along(years)) {
-    subset <- effort2[effort2$biweek == biweeks[i] & effort2$year == years[t],
-                      size_colnames, drop = FALSE]
-    if (nrow(subset) > 0) {
-      counts[i, t, 1:nrow(subset), ] <- as.matrix(subset)
-    }
-  }
-}
+# D is now a vector: same calendar date for occasion t in every year
+D <- biweek[occasions] / 365 
+D <- D - min(D)
 
-# create ncap
-ncap <- array(0, dim = c(length(biweeks), length(years), length(size_colnames)),
-              dimnames = list(biweeks, years, size_colnames))
+# which (t, y) pairs were actually sampled
+pairs <- unique(effort2[, c("occ", "yidx")])
+pairs <- pairs[order(pairs$yidx, pairs$occ), ]
+occ_t <- as.integer(pairs$occ)
+occ_y <- as.integer(pairs$yidx)
+n_pair <- nrow(pairs)
 
-agg <- effort2 %>%
-  summarize(across(all_of(size_colnames), sum), .by = c(biweek, year))
+# the complement — occasions with no sampling
+all_pairs <- expand.grid(occ = 1:n_occ, yidx = 1:n_year)
+un <- all_pairs[!paste(all_pairs$occ, all_pairs$yidx) %in%
+                  paste(occ_t, occ_y), ]
+un_t <- as.integer(un$occ); un_y <- as.integer(un$yidx)
+n_un <- nrow(un)
 
-for (r in 1:nrow(agg)) {
-  bw <- match(agg$biweek[r], biweeks)
-  t <- match(agg$year[r], years)
-  ncap[bw, t, ] <- as.numeric(agg[r, size_colnames])
-}
+# map every row of effort2 to its pair index
+effort2$pair <- match(paste(effort2$occ, effort2$yidx),
+                      paste(occ_t, occ_y))
+stopifnot(!any(is.na(effort2$pair)))
 
-# total time
-totalt <- unname(tapply(effort2$biweek, effort2$year, 
-                        function(x) length(unique(x))))
+# renumber traps within each pair
+effort2 <- effort2 %>%
+  arrange(pair) %>%
+  mutate(trap_j = row_number(), .by = pair)
 
-# total obs
-totalo <- unclass(table(effort2$biweek, effort2$year))
+totalo <- as.integer(tabulate(effort2$pair, nbins = n_pair))
+ntrap  <- max(totalo)
+nsizes <- length(size_colnames)
 
-# shift_up <- function(x) {
-#   first <- which(x != 0)[1]
-#   if (is.na(first)) return(rep(0, length(x)))
-#   c(x[first:length(x)], rep(0, first - 1))
-# }
-# 
-# totalo_shifted <- apply(totalo, 2, shift_up)
-# rownames(totalo_shifted) <- NULL
-# totalo_shifted <- totalo_shifted[rowSums(totalo_shifted) > 0, , drop = FALSE]
-
-# trap type index
-ntrap <- max(effort2$trap_int)
-
+# ---- trap-type indicators and soak days: [pair, trap] ----
 make_index <- function(col) {
-  out <- array(NA, dim = c(length(biweeks), length(years), ntrap),
-               dimnames = list(biweeks, years, NULL))
-  b <- match(effort2$biweek, biweeks)
-  t <- match(effort2$year, years)
-  out[cbind(b, t, effort2$trap_int)] <- effort2[[col]]
+  out <- matrix(0, nrow = n_pair, ncol = ntrap)
+  out[cbind(effort2$pair, effort2$trap_j)] <- effort2[[col]]
   out
 }
-
 m_index <- make_index("minnow")
 f_index <- make_index("fukui")
 s_index <- make_index("shrimp")
 
-# get biweek index
-years <- sort(unique(effort2$year))
+soak_days <- matrix(1, nrow = n_pair, ncol = ntrap)
+# if you have real soak days in effort2:
+# soak_days <- matrix(1, n_pair, ntrap)
+# soak_days[cbind(effort2$pair, effort2$trap_j)] <- effort2$soak
 
-bw_list <- lapply(years, 
-                  function(y) sort(unique(effort2$biweek[effort2$year == y])))
-nmax <- max(lengths(bw_list))
+# ---- catch: [pair, trap, size] ----
+C <- array(0, dim = c(n_pair, ntrap, nsizes),
+           dimnames = list(NULL, NULL, size_colnames))
+idx <- cbind(effort2$pair, effort2$trap_j)
+for (k in seq_len(nsizes)) {
+  C[cbind(idx, k)] <- effort2[[size_colnames[k]]]
+}
 
-index <- sapply(bw_list, function(v) c(v, rep(NA, nmax - length(v))))
+# ---- total catch
+C_T <- array(0L, dim = c(n_occ, n_year, nsizes),
+             dimnames = list(NULL, years, size_colnames))
 
-# get year fraction
-index_full <- index - 3
-index_frac <- index_full * 14 / 365
-
-# get temporary soak days
-soak_days <- array(1, dim = dim(m_index))
-
+for (j in 1:n_pair) {
+  C_T[occ_t[j], occ_y[j], ] <- apply(C[j, 1:totalo[j], , drop = FALSE], 3, sum)
+}
 
 # save model data
-saveRDS(counts, "sample_data/model_data/counts.rds")
-saveRDS(ncap, "sample_data/model_data/ncap.rds")
-saveRDS(m_index, "sample_data/model_data/m_index.rds")
-saveRDS(f_index, "sample_data/model_data/f_index.rds")
-saveRDS(s_index, "sample_data/model_data/s_index.rds")
-saveRDS(totalo_shifted, "sample_data/model_data/totalo.rds")
-saveRDS(totalt, "sample_data/model_data/totalt.rds")
-saveRDS(index, "sample_data/model_data/index.rds")
-saveRDS(index_frac, "sample_data/model_data/index_frac.rds")
-saveRDS(soak_days, "sample_data/model_data/soak_days.rds")
-saveRDS(y, "sample_data/model_data/x.rds")
-saveRDS(b, "sample_data/model_data/b.rds")
+saveRDS(C, file.path(output_dir, "counts.rds"))
+saveRDS(C_T, file.path(output_dir, "ncap.rds"))
+saveRDS(m_index, file.path(output_dir, "m_index.rds"))
+saveRDS(f_index, file.path(output_dir, "f_index.rds"))
+saveRDS(s_index, file.path(output_dir, "s_index.rds"))
+saveRDS(n_occ, file.path(output_dir, "n_occ.rds"))
+saveRDS(n_year, file.path(output_dir, "n_year.rds"))
+saveRDS(n_pair, file.path(output_dir, "n_pair.rds"))
+saveRDS(occ_t, file.path(output_dir, "occ_t.rds"))
+saveRDS(occ_y, file.path(output_dir, "occ_y.rds"))
+saveRDS(totalo, file.path(output_dir, "totalo.rds"))
+saveRDS(D, file.path(output_dir, "D.rds"))
+saveRDS(soak_days, file.path(output_dir, "soak_days.rds"))
+saveRDS(y, file.path(output_dir, "x.rds"))
+saveRDS(b, file.path(output_dir, "b.rds"))

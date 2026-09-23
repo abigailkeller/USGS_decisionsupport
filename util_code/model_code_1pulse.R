@@ -2,31 +2,62 @@ library(nimble)
 library(MCMCvis)
 library(parallel)
 library(expm)
+library(jsonlite)
+
+# command-line args: <data_dir> <output_path> <progress_path> <iter> <thin> <nchains>
+# falls back to the original standalone defaults when run with no args
+args <- commandArgs(trailingOnly = TRUE)
+data_dir <- if (length(args) >= 1) args[1] else "data/model_data"
+output_path <- if (length(args) >= 2) args[2] else "data/posterior_samples/onepulse.rds"
+progress_path <- if (length(args) >= 3) args[3] else "data/posterior_samples/progress.json"
+iter <- if (length(args) >= 4) as.integer(args[4]) else 5000
+thin <- if (length(args) >= 5) as.integer(args[5]) else 10
+nchains <- if (length(args) >= 6) as.integer(args[6]) else 4
+
+dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
+dir.create(dirname(progress_path), recursive = TRUE, showWarnings = FALSE)
+
+# writes progress atomically (write to a temp file, then rename) so a reader
+# polling progress_path never sees a half-written file
+write_progress <- function(phase, completed, total, message = "",
+                           done = FALSE, error = NULL) {
+  payload <- list(phase = phase, completed = completed, total = total,
+                  message = message, done = done, error = error,
+                  updatedAt = format(Sys.time(), "%Y-%m-%dT%H:%M:%OS3Z",
+                                     tz = "UTC"))
+  tmp <- paste0(progress_path, ".tmp")
+  writeLines(toJSON(payload, auto_unbox = TRUE, null = "null"), tmp)
+  file.rename(tmp, progress_path)
+}
+
+run_model <- function() {
+
+write_progress("preparing", 0, iter, "Loading prepared model data...")
 
 # read in time series data
-C <- readRDS("sample_data/model_data/counts.rds")
-C_T <- readRDS("sample_data/model_data/ncap.rds")
+C <- readRDS(file.path(data_dir, "counts.rds"))
+C_T <- readRDS(file.path(data_dir, "ncap.rds"))
 
 # read in time series constants
-n_occ <- readRDS("sample_data/model_data/n_occ.rds")
-n_year <- readRDS("sample_data/model_data/n_year.rds")
-n_pair <- readRDS("sample_data/model_data/n_pair.rds")
-occ_t <- readRDS("sample_data/model_data/occ_t.rds")
-occ_y <- readRDS("sample_data/model_data/occ_y.rds")
-D <- readRDS("sample_data/model_data/D.rds")
-totalo <- readRDS("sample_data/model_data/totalo.rds")
-soak_days <- readRDS("sample_data/model_data/soak_days.rds")
-m_index <- readRDS("sample_data/model_data/m_index.rds")
-f_index <- readRDS("sample_data/model_data/f_index.rds")
-s_index <- readRDS("sample_data/model_data/s_index.rds")
+n_occ <- readRDS(file.path(data_dir, "n_occ.rds"))
+n_year <- readRDS(file.path(data_dir, "n_year.rds"))
+n_pair <- readRDS(file.path(data_dir, "n_pair.rds"))
+occ_t <- readRDS(file.path(data_dir, "occ_t.rds"))
+occ_y <- readRDS(file.path(data_dir, "occ_y.rds"))
+D <- readRDS(file.path(data_dir, "D.rds"))
+totalo <- readRDS(file.path(data_dir, "totalo.rds"))
+soak_days <- readRDS(file.path(data_dir, "soak_days.rds"))
+m_index <- readRDS(file.path(data_dir, "m_index.rds"))
+f_index <- readRDS(file.path(data_dir, "f_index.rds"))
+s_index <- readRDS(file.path(data_dir, "s_index.rds"))
 
 # get recruit intro
 recruit_intro <- rep(0, length(D))
-recruit_intro[7] <- 1
+recruit_intro[6] <- 1
 
 # read in IPM constants
-b <- readRDS("sample_data/model_data/b.rds")
-x <- readRDS("sample_data/model_data/x.rds")
+b <- readRDS(file.path(data_dir, "b.rds"))
+x <- readRDS(file.path(data_dir, "x.rds"))
 
 
 # Write model code
@@ -132,7 +163,7 @@ model_code <- nimbleCode({
   
   # minnow max. hazard rate
   h_M_max ~ dnorm(0.0003912, sd = 0.0000617)
-  # h_M_max <- 0.0003912
+  #h_M_max <- 0.0003912
   # minnow max. size of capture
   # h_M_A ~ dnorm(45.12, sd = 0.67)
   h_M_A <- 45.12
@@ -141,7 +172,7 @@ model_code <- nimbleCode({
   h_M_sigma <- 6.449
   # fukui max. hazard rate
   h_F_max ~ dnorm(0.0001784, sd = 0.000015)
-  # h_F_max <- 0.0001784
+  #h_F_max <- 0.0001784
   # fukui k of logistic size selectivity curve
   # h_F_k ~ dnorm(0.4977, sd = 0.1878)
   h_F_k <- 0.4977
@@ -150,7 +181,7 @@ model_code <- nimbleCode({
   h_F_0 <- 35.34
   # shrimp max. hazard rate
   h_S_max ~ dnorm(0.003937, sd = 0.0004)
-  # h_S_max <- 0.003937
+  #h_S_max <- 0.003937
   # shrimp k of logistic size selectivity curve
   # h_S_k ~ dnorm(0.3437, sd = 0.0543)
   h_S_k <- 0.3437
@@ -183,8 +214,10 @@ model_code <- nimbleCode({
   ##
   
   # initial adult size (lognormal mean and sd)
-  log_mu_A ~ dunif(3.25, 4.5)
-  sigma_A ~ dunif(0.1, 1)
+  # log_mu_A ~ dunif(3.25, 4.5)
+  log_mu_A <- 4.018
+  # sigma_A ~ dunif(0.1, 1)
+  sigma_A <- 0.378
   
   # initial recruit size (mean and sd)
   # mu_R ~ dnorm(0.2156, sd = 0.0191)
@@ -192,7 +225,7 @@ model_code <- nimbleCode({
   # sigma_R ~ dnorm(10.74, sd = 2.68)
   sigma_R <- 10.74
   
-  # abundance of recruits (lognormal mean and sd)
+  # abundance of adults (lognormal mean and sd)
   mu_lambda_R ~ dunif(-50, 50)
   sigma_lambda_R ~ dunif(0, 10000)
   
@@ -247,6 +280,26 @@ data <- list(
   C = C
 )
 
+# set up initial values
+# crude capture probability from the fixed selectivity parameters
+haz_one <- function(x) {                       # per-trap-day hazard by size
+  0.0001784 / (1 + exp(-0.4977 * (x - 35.34))) +      # fukui
+    0.003937  / (1 + exp(-0.3437 * (x - 46.41))) +      # shrimp
+    0.0003912 * exp(-(x - 45.12)^2 / (2 * 6.449^2))     # minnow
+}
+# average traps per occasion, times occasions per year
+traps_per_year <- tapply(totalo, occ_y, sum)
+p_year <- sapply(traps_per_year, function(nt) 1 - exp(-nt * haz_one(x)))
+
+catch_year <- apply(C_T, c(2, 3), sum) 
+
+# implied abundance needed, with a safety factor
+lambda_floor <- sapply(seq_len(n_year), function(yy) {
+  needed <- catch_year[yy, ] / pmax(p_year[, yy], 1e-6)
+  sum(needed, na.rm = TRUE) * 3
+})
+
+
 # initial values
 inits <- function() {
   list(
@@ -261,30 +314,38 @@ inits <- function() {
     #gk = 1.2, xinf = 81, A = 1.5, ds = 0.24, sigma_G = 2.8, 
     #sigma_R = 1, mu_R = 20, 
     log_mu_A = 4, sigma_A = 0.2,
-    lambda_A = runif(n_year, 3000, 10000), 
-    lambda_R = runif(n_year, 3000, 10000), 
-    mu_lambda_A = log(500), mu_lambda_R = log(500),
-    sigma_lambda_A = 0.3, sigma_lambda_R = 0.3
+    lambda_A = pmax(lambda_floor, 1000), 
+    lambda_R = pmax(lambda_floor, 1000), 
+    mu_lambda_A = mean(log(pmax(lambda_floor, 1000))), 
+    mu_lambda_R = mean(log(pmax(lambda_floor, 1000))),
+    sigma_lambda_A = max(sd(log(pmax(lambda_floor, 1000))), 0.2), 
+    sigma_lambda_R = max(sd(log(pmax(lambda_floor, 1000))), 0.2)
   )
 }
-
 
 ########################
 # run MCMC in parallel #
 ########################
 
-cl <- makeCluster(4)
+cl <- makeCluster(nchains)
 
 set.seed(10120)
 
-clusterExport(cl, c("model_code", "inits", "data", "constants", "n_year"))
+clusterExport(cl, c("model_code", "inits", "data", "constants", "n_year",
+                    "lambda_floor"),
+             envir = environment())
 
-# Create a function with all the needed code
-out <- clusterEvalQ(cl, {
+write_progress("compiling", 0, iter, "Building and compiling the model...")
+
+# One-time setup per worker: define the custom nimble functions, build the
+# model and MCMC, and compile them. Each worker keeps its compiled MCMC
+# (`cmodel_mcmc`) alive in its own global environment across the later
+# clusterEvalQ() calls that advance the chain in chunks below.
+invisible(clusterEvalQ(cl, {
   library(nimble)
   library(coda)
   library(expm)
-  
+
   # define dirichlet multinomial mixture
   # pdf
   ddirchmulti <- nimbleFunction (
@@ -538,8 +599,8 @@ out <- clusterEvalQ(cl, {
     monitors = c("mu_lambda_A", "sigma_lambda_A",
                  "mu_lambda_R", "sigma_lambda_R",
                  "lambda_R", "lambda_A",
-                 "log_mu_A", "sigma_A",
-                 "h_M_max", "h_F_max", "h_S_max"),
+                 "h_M_max", "h_F_max", "h_S_max"
+                 ),
     useConjugacy = FALSE, enableWAIC = TRUE)
   
   # build MCMC
@@ -550,27 +611,59 @@ out <- clusterEvalQ(cl, {
   
   # compile the MCMC
   cmodel_mcmc <- compileNimble(myMCMC, project = myModel)
-  
-  # run MCMC
-  cmodel_mcmc$run(50000, thin = 10,
-                  reset = TRUE)
-  
-  samples <- as.mcmc(as.matrix(cmodel_mcmc$mvSamples))
-  
-  return(samples)
-})
+
+  NULL
+}))
+
+# ---- run the MCMC in chunks, checkpointing progress after each one ----
+# nimble's MCMC$run() accumulates samples across repeated calls as long as
+# reset = FALSE after the first call, so this produces the same `iter` total
+# samples as a single run(iter) call would, just with progress visibility.
+n_chunks <- max(1, min(20, iter))
+chunk_size <- ceiling(iter / n_chunks)
+completed <- 0
+write_progress("sampling", 0, iter, "Starting MCMC sampling...")
+while (completed < iter) {
+  this_chunk <- min(chunk_size, iter - completed)
+  is_first_chunk <- completed == 0
+  clusterExport(cl, c("this_chunk", "thin", "is_first_chunk"),
+               envir = environment())
+  invisible(clusterEvalQ(cl, {
+    cmodel_mcmc$run(this_chunk, thin = thin, reset = is_first_chunk)
+    NULL
+  }))
+  completed <- completed + this_chunk
+  write_progress("sampling", completed, iter,
+                 sprintf("Sampling: %d of %d iterations", completed, iter))
+}
+
+write_progress("saving", iter, iter, "Collecting posterior samples...")
+
+out <- clusterEvalQ(cl, as.mcmc(as.matrix(cmodel_mcmc$mvSamples)))
 
 # discard burnin
-lower <- 2000
-upper <- 5000
+lower <- iter / thin * 0.4
+upper <- iter / thin
 sequence <- seq(lower, upper, 1)
-out_sub <- list(out[[1]][sequence, ], out[[2]][sequence, ],
-                out[[3]][sequence, ], out[[4]][sequence, ])
+out_sub <- lapply(out, function(chain) chain[sequence, ])
 
 # save samples
-saveRDS(out_sub, "sample_data/posterior_samples/onepulse_20260921_short.rds")
+saveRDS(out_sub, output_path)
 
 stopCluster(cl)
+
+write_progress("done", iter, iter, "MCMC run complete.", done = TRUE)
+
+}
+
+tryCatch(
+  run_model(),
+  error = function(e) {
+    write_progress("error", 0, iter, "MCMC run failed.", done = TRUE,
+                   error = conditionMessage(e))
+    quit(status = 1)
+  }
+)
 
 # calculate WAIC
 # samples_mat <- rbind(out_sub[[1]], out_sub[[2]],

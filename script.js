@@ -338,7 +338,6 @@ function handleFile(kind, file) {
 function canEnterStep(step) {
   if (step <= 2) return true;
   if (!uploadedData.catch || !uploadedData.effort || !document.querySelector('#data-confirmed').checked) return false;
-  if (step >= 5 && !document.querySelector('[data-view="4"] .step-check').checked) return false;
   if (step >= 7 && document.querySelector('#training-next').disabled) return false;
   return true;
 }
@@ -692,6 +691,125 @@ document.querySelectorAll('.drop-zone').forEach((zone) => {
   ['dragenter', 'dragover'].forEach((name) => zone.addEventListener(name, (event) => { event.preventDefault(); zone.classList.add('is-over'); }));
   ['dragleave', 'drop'].forEach((name) => zone.addEventListener(name, (event) => { event.preventDefault(); zone.classList.remove('is-over'); }));
   zone.addEventListener('drop', (event) => handleFile(kind, event.dataTransfer.files[0]));
+});
+
+function formatDateForExport(date) {
+  return `${date.getMonth() + 1}/${date.getDate()}/${date.getFullYear()}`;
+}
+
+function buildModelExportRows() {
+  const catchCols = { date: selectedColumnIndex('catch', 'date'), size: selectedColumnIndex('catch', 'size'), trapType: selectedColumnIndex('catch', 'trap-type'), trapId: selectedColumnIndex('catch', 'trap-id') };
+  const effortCols = { dateChecked: selectedColumnIndex('effort', 'date-checked'), trapType: selectedColumnIndex('effort', 'trap-type'), trapId: selectedColumnIndex('effort', 'trap-id') };
+  const catchFormat = selectedDateFormat('catch', 'date');
+  const effortFormat = selectedDateFormat('effort', 'date-checked');
+
+  const catchRows = (uploadedData.catch?.filteredRows || []).map((row) => {
+    const date = catchFormat ? parseDateWithFormat(row[catchCols.date], catchFormat) : null;
+    const size = Number(row[catchCols.size]);
+    if (!date || !Number.isFinite(size)) return null;
+    return [formatDateForExport(date), row[catchCols.trapType], row[catchCols.trapId], size];
+  }).filter(Boolean);
+
+  const effortRows = (uploadedData.effort?.filteredRows || []).map((row) => {
+    const date = effortFormat ? parseDateWithFormat(row[effortCols.dateChecked], effortFormat) : null;
+    if (!date) return null;
+    return [formatDateForExport(date), row[effortCols.trapType], row[effortCols.trapId]];
+  }).filter(Boolean);
+
+  return { catchRows, effortRows };
+}
+
+async function parseJsonResponse(response) {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error('The server did not return a valid response. Make sure the app is running via "node server.js" (not a plain static file server), since this feature needs its API.');
+  }
+}
+
+let regimeProgressTimer = null;
+
+function pollModelProgress() {
+  const ring = document.querySelector('#regime-run-ring');
+  const title = document.querySelector('#regime-run-title');
+  const copy = document.querySelector('#regime-run-copy');
+  const bar = document.querySelector('#regime-run-bar');
+  const errorEl = document.querySelector('#regime-run-error');
+  const button = document.querySelector('#regime-run-button');
+
+  const PHASE_LABELS = { preparing: 'Preparing data', compiling: 'Building and compiling the model', sampling: 'Sampling', saving: 'Saving results' };
+
+  clearInterval(regimeProgressTimer);
+  regimeProgressTimer = setInterval(() => {
+    fetch('api/run-model/progress').then((response) => response.json()).then((progress) => {
+      const percent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+      bar.style.width = `${percent}%`;
+      title.textContent = PHASE_LABELS[progress.phase] || 'Running';
+      copy.textContent = progress.message || '';
+      if (progress.done) {
+        clearInterval(regimeProgressTimer);
+        button.disabled = false;
+        if (progress.error) {
+          showError(errorEl, progress.error);
+          title.textContent = 'Model run failed';
+        } else {
+          ring.classList.add('is-done');
+          title.textContent = 'Model run complete';
+          copy.textContent = 'Saving posterior samples';
+          bar.style.width = '100%';
+          document.querySelector('#regime-download-button').hidden = false;
+        }
+      }
+    }).catch(() => {});
+  }, 1500);
+}
+
+document.querySelector('#regime-run-button').addEventListener('click', (event) => {
+  const button = event.currentTarget;
+  const ring = document.querySelector('#regime-run-ring');
+  const title = document.querySelector('#regime-run-title');
+  const copy = document.querySelector('#regime-run-copy');
+  const bar = document.querySelector('#regime-run-bar');
+  const errorEl = document.querySelector('#regime-run-error');
+
+  errorEl.hidden = true;
+  document.querySelector('#regime-download-button').hidden = true;
+  button.disabled = true;
+  ring.classList.remove('is-done');
+  bar.style.width = '0%';
+  title.textContent = 'Preparing data';
+  copy.textContent = 'Building model inputs from your catch and effort data...';
+
+  const { catchRows, effortRows } = buildModelExportRows();
+  if (!catchRows.length || !effortRows.length) {
+    showError(errorEl, 'No valid catch or effort rows are available to run the model.');
+    button.disabled = false;
+    return;
+  }
+
+  fetch('api/prepare-data', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ catchRows, effortRows }),
+  }).then(async (response) => {
+    const result = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(result.error || 'Data preparation failed.');
+    title.textContent = 'Building and compiling the model';
+    copy.textContent = 'This can take a minute the first time.';
+    return fetch('api/run-model', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+  }).then(async (response) => {
+    const result = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(result.error || 'Could not start the model run.');
+    pollModelProgress();
+  }).catch((error) => {
+    showError(errorEl, error.message);
+    button.disabled = false;
+  });
 });
 
 document.querySelector('#train-button').addEventListener('click', (event) => {

@@ -60,9 +60,9 @@ model_code <- nimbleCode({
   
   ## annual abundance of recruits and adults
   for (m in 1:n_year) {
-    lambda_R[m] ~ dlnorm(mu_lambda_R, sdlog = sigma_lambda_R)
-    lambda_A1[m] ~ dlnorm(mu_lambda_A1, sdlog = sigma_lambda_A1)
-    lambda_A2p[m] ~ dlnorm(mu_lambda_A2p, sdlog = sigma_lambda_A2p)
+    lambda_R[m] ~ dunif(0, 100000)
+    lambda_A1[m] ~ dunif(0, 50000)
+    lambda_A2p[m] ~ dunif(0, 50000)
   }
   
   ## annual size distribution of recruits
@@ -135,8 +135,8 @@ model_code <- nimbleCode({
   ##
   
   # minnow max. hazard rate
-  h_M_max ~ dnorm(0.0003912, sd = 0.0000617)
-  # h_M_max <- 0.0003912
+  # h_M_max ~ dnorm(0.0003912, sd = 0.0000617)
+  h_M_max <- 0.0003912
   # minnow max. size of capture
   # h_M_A ~ dnorm(45.12, sd = 0.67)
   h_M_A <- 45.12
@@ -144,8 +144,8 @@ model_code <- nimbleCode({
   # h_M_sigma ~ dnorm(6.449, sd = 0.376)
   h_M_sigma <- 6.449
   # fukui max. hazard rate
-  h_F_max ~ dnorm(0.0001784, sd = 0.000015)
-  # h_F_max <- 0.0001784
+  # h_F_max ~ dnorm(0.0001784, sd = 0.000015)
+  h_F_max <- 0.0001784
   # fukui k of logistic size selectivity curve
   # h_F_k ~ dnorm(0.4977, sd = 0.1878)
   h_F_k <- 0.4977
@@ -153,8 +153,8 @@ model_code <- nimbleCode({
   # h_F_0 ~ dnorm(35.34, sd = 1.98)
   h_F_0 <- 35.34
   # shrimp max. hazard rate
-  h_S_max ~ dnorm(0.003937, sd = 0.0004)
-  # h_S_max <- 0.003937
+  # h_S_max ~ dnorm(0.003937, sd = 0.0004)
+  h_S_max <- 0.003937
   # shrimp k of logistic size selectivity curve
   # h_S_k ~ dnorm(0.3437, sd = 0.0543)
   h_S_k <- 0.3437
@@ -203,17 +203,17 @@ model_code <- nimbleCode({
   # sigma_R ~ dnorm(10.74, sd = 2.68)
   sigma_R <- 10.74
   
-  # abundance of recruits (lognormal mean and sd)
-  mu_lambda_R ~ dunif(-50, 50)
-  sigma_lambda_R ~ dunif(0, 10000)
-  
-  # abundance of adults - 1year (lognormal mean and sd)
-  mu_lambda_A1 ~ dunif(-50, 50)
-  sigma_lambda_A1 ~ dunif(0, 10000)
-  
-  # abundance of adults - 2plus (lognormal mean and sd)
-  mu_lambda_A2p ~ dunif(-50, 50)
-  sigma_lambda_A2p ~ dunif(0, 10000)
+  # # abundance of recruits (lognormal mean and sd)
+  # mu_lambda_R ~ dunif(-50, 50)
+  # sigma_lambda_R ~ dunif(0, 10000)
+  # 
+  # # abundance of adults - 1year (lognormal mean and sd)
+  # mu_lambda_A1 ~ dunif(-50, 50)
+  # sigma_lambda_A1 ~ dunif(0, 10000)
+  # 
+  # # abundance of adults - 2plus (lognormal mean and sd)
+  # mu_lambda_A2p ~ dunif(-50, 50)
+  # sigma_lambda_A2p ~ dunif(0, 10000)
   
   
 })
@@ -265,12 +265,12 @@ data <- list(
 # initial values
 inits <- function() {
   list(
-    h_M_max = 0.0003912, 
+    #h_M_max = 0.0003912, 
     #h_M_A = 45.12, 
     #h_M_sigma = 6.449, 
-    h_F_max = 0.0001784, 
+    #h_F_max = 0.0001784, 
     #h_F_k = 0.4977, h_F_0 = 35.34,
-    h_S_max = 0.003937, 
+    #h_S_max = 0.003937, 
     #h_S_k = 0.3437, 
     #h_S_0 = 46.41, ro_dir = 0.01, alpha = 9.498, beta = 0.00178,
     #gk = 1.2, xinf = 81, A = 1.5, ds = 0.24, sigma_G = 2.8, 
@@ -279,9 +279,9 @@ inits <- function() {
     #log_mu_A1 = 3.75, sigma_A1 = 0.2,
     lambda_A1 = runif(n_year, 3000, 10000), 
     lambda_A2p = runif(n_year, 3000, 10000), 
-    lambda_R = runif(n_year, 3000, 10000), 
-    mu_lambda_A1 = log(500), mu_lambda_A2p = log(500), mu_lambda_R = log(500),
-    sigma_lambda_A1 = 0.3, sigma_lambda_A2p = 0.3, sigma_lambda_R = 0.3
+    lambda_R = runif(n_year, 3000, 10000)#, 
+    #mu_lambda_A1 = log(500), mu_lambda_A2p = log(500), mu_lambda_R = log(500),
+    #sigma_lambda_A1 = 0.3, sigma_lambda_A2p = 0.3, sigma_lambda_R = 0.3
   )
 }
 
@@ -552,10 +552,10 @@ out <- clusterEvalQ(cl, {
   # build the MCMC
   mcmcConf_myModel <- configureMCMC(
     myModel,
-    monitors = c("mu_lambda_A2p", "sigma_lambda_A2p",
-                 "mu_lambda_R", "sigma_lambda_R",
+    monitors = c(#"mu_lambda_A2p", "sigma_lambda_A2p",
+                 #"mu_lambda_R", "sigma_lambda_R",
                  "lambda_R", "lambda_A1", "lambda_A2p",
-                 "h_M_max", "h_F_max", "h_S_max"),
+                 "adult_diff", "sigma_A2p"),
     useConjugacy = FALSE, enableWAIC = TRUE)
   
   # build MCMC
@@ -568,7 +568,7 @@ out <- clusterEvalQ(cl, {
   cmodel_mcmc <- compileNimble(myMCMC, project = myModel)
   
   # run MCMC
-  cmodel_mcmc$run(40000, thin = 10,
+  cmodel_mcmc$run(20000, thin = 10,
                   reset = TRUE)
   
   samples <- as.mcmc(as.matrix(cmodel_mcmc$mvSamples))
@@ -577,13 +577,13 @@ out <- clusterEvalQ(cl, {
 })
 
 # discard burnin
-lower <- 1000
-upper <- 4000
+lower <- 500
+upper <- 2000
 sequence <- seq(lower, upper, 1)
 out_sub <- list(out[[1]][sequence, ], out[[2]][sequence, ],
                 out[[3]][sequence, ], out[[4]][sequence, ])
 
 # save samples
-saveRDS(out_sub, "sample_data/posterior_samples/twoadults_20260922.rds")
+saveRDS(out_sub, "sample_data/posterior_samples/twoadults_20260922_3.rds")
 
 stopCluster(cl)
