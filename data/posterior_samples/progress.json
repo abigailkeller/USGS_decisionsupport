@@ -1,1 +1,1 @@
-{"phase":"done","completed":5000,"total":5000,"message":"MCMC run complete.","done":true,"error":null,"updatedAt":"2026-09-23T21:16:29.777Z"}
+{"phase":"error","completed":0,"total":5000,"message":"MCMC run failed.","done":true,"error":"4 nodes produced errors; first error: NIMBLE compiler does not support reduction operations on scalar arguments.\n This occurred for: sum(tot)\n This was part of the call:  -(sum(tot))","updatedAt":"2026-09-28T21:45:41.089Z"}

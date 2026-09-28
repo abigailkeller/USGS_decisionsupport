@@ -1,12 +1,15 @@
 library(tidyverse)
 
-# command-line args: <catch_csv> <effort_csv> <output_dir>
+# command-line args: <catch_csv> <effort_csv> <output_dir> <catch_date_format> <effort_date_format>
+# date formats use R's strptime/as.Date tokens (e.g. "%m/%d/%Y", "%Y-%m-%d")
 # falls back to the bundled sample data when run with no args (unchanged
 # standalone behavior)
 args <- commandArgs(trailingOnly = TRUE)
 catch_path <- if (length(args) >= 1) args[1] else "sample_data/draytonharbor_catch.csv"
 effort_path <- if (length(args) >= 2) args[2] else "sample_data/draytonharbor_effort.csv"
 output_dir <- if (length(args) >= 3) args[3] else "data/model_data"
+date_format_catch <- if (length(args) >= 4) args[4] else "%m/%d/%Y"
+date_format_effort <- if (length(args) >= 5) args[5] else "%m/%d/%Y"
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
 # create parameters for IPM mesh
@@ -29,13 +32,9 @@ biweek <- c(59, 76, 91, 106, 121, 137, 152, 167, 182, 198, 213, 229,
 catch <- read.csv(catch_path)
 effort <- read.csv(effort_path)
 
-# date formats
-date_format_catch <- "%m/%d/%Y"
-date_format_effort <- "%m/%d/%Y"
-
 # convert date
-effort$Date <- as.Date(effort$Date, date_format_catch)
-catch$Date <- as.Date(catch$Date, date_format_effort)
+catch$Date <- as.Date(catch$Date, date_format_catch)
+effort$Date <- as.Date(effort$Date, date_format_effort)
 
 # remove rows without date
 effort <- effort[!is.na(effort$Date), ]

@@ -10,6 +10,8 @@ const POSTERIOR_DIR = path.join(ROOT, 'data', 'posterior_samples');
 const PROGRESS_PATH = path.join(POSTERIOR_DIR, 'progress.json');
 const OUTPUT_PATH = path.join(POSTERIOR_DIR, 'onepulse.rds');
 const PORT = process.env.PORT || 8000;
+// matches formatDateForExport() in script.js, which always writes dates in this shape
+const EXPORT_DATE_FORMAT = '%m/%d/%Y';
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -83,7 +85,7 @@ function handlePrepareData(req, res) {
     writeCsv(catchPath, ['Date', 'Trap_Type', 'Trap_Number', 'Size_mm'], catchRows);
     writeCsv(effortPath, ['Date', 'Trap_Type', 'Trap_Number'], effortRows);
 
-    execFile('Rscript', ['util_code/prep_model_data.R', catchPath, effortPath, MODEL_DATA_DIR], { cwd: ROOT, maxBuffer: 20 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile('Rscript', ['util_code/prep_model_data.R', catchPath, effortPath, MODEL_DATA_DIR, EXPORT_DATE_FORMAT, EXPORT_DATE_FORMAT], { cwd: ROOT, maxBuffer: 20 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
         return sendJson(res, 500, { error: 'Data preparation failed.', details: stderr || stdout || error.message });
       }

@@ -8,7 +8,7 @@ library(jsonlite)
 # falls back to the original standalone defaults when run with no args
 args <- commandArgs(trailingOnly = TRUE)
 data_dir <- if (length(args) >= 1) args[1] else "data/model_data"
-output_path <- if (length(args) >= 2) args[2] else "data/posterior_samples/onepulse.rds"
+output_path <- if (length(args) >= 2) args[2] else "data/posterior_samples/twopulse.rds"
 progress_path <- if (length(args) >= 3) args[3] else "data/posterior_samples/progress.json"
 iter <- if (length(args) >= 4) as.integer(args[4]) else 5000
 thin <- if (length(args) >= 5) as.integer(args[5]) else 10
@@ -52,8 +52,9 @@ f_index <- readRDS(file.path(data_dir, "f_index.rds"))
 s_index <- readRDS(file.path(data_dir, "s_index.rds"))
 
 # get recruit intro
-recruit_intro <- rep(0, length(D))
-recruit_intro[6] <- 1
+recruit_intro1 <- recruit_intro2 <- rep(0, length(D))
+recruit_intro1[2] <- 1
+recruit_intro2[6] <- 1
 
 # read in IPM constants
 b <- readRDS(file.path(data_dir, "b.rds"))
@@ -82,7 +83,8 @@ model_code <- nimbleCode({
     for (t in 1:(n_occ - 1)) {
       N[t + 1, y, 1:n_size] <- K[t, 1:n_size, 1:n_size] %*%
         (N[t, y, 1:n_size] - C_T[t, y, 1:n_size]) +
-        recruit_intro[t] * R[y, 1:n_size]
+        recruit_intro1[t] * R_1[y, 1:n_size] +
+        recruit_intro2[t] * R_2[y, 1:n_size]
     }
   }
   
@@ -97,6 +99,11 @@ model_code <- nimbleCode({
                                              upper[1:n_size],
                                              lambda_R[1:n_year], n_year,
                                              n_size)
+  
+  # spread recruits between pulses
+  R_1[1:n_year, 1:n_size] <- prop_1 * R[1:n_year, 1:n_size]
+  R_2[1:n_year, 1:n_size] <- (1 - prop_1) * R[1:n_year, 1:n_size]
+  prop_1 ~ dbeta(1, 1)
   
   
   #####################
@@ -268,8 +275,10 @@ constants <- list(
   D = D,
   # number of soak days for each trap at time t, trap j, year i
   soak_days = soak_days,
+  # data structure to introduce recruits into the model at t = 2
+  recruit_intro1 = recruit_intro1,
   # data structure to introduce recruits into the model at t = 6
-  recruit_intro = recruit_intro,
+  recruit_intro2 = recruit_intro2,
   pi = pi
 )
 
@@ -303,6 +312,7 @@ lambda_floor <- sapply(seq_len(n_year), function(yy) {
 # initial values
 inits <- function() {
   list(
+    prop_1 = 0.1,
     h_M_max = 0.0003912, 
     # h_M_A = 45.12, 
     #h_M_sigma = 6.449,
@@ -596,7 +606,7 @@ invisible(clusterEvalQ(cl, {
     myModel,
     monitors = c("mu_lambda_A", "sigma_lambda_A",
                  "mu_lambda_R", "sigma_lambda_R",
-                 "lambda_R", "lambda_A",
+                 "lambda_R", "lambda_A", "prop_1", 
                  "h_M_max", "h_F_max", "h_S_max"
                  ),
     useConjugacy = FALSE, enableWAIC = TRUE)
