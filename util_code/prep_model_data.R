@@ -60,6 +60,12 @@ effort <- effort[effort$trap_type %in% c("minnow", "fukui", "shrimp"), ]
 effort$julian_day <- as.POSIXlt(effort$date, format = date_format_effort)$yday
 catch$julian_day <- as.POSIXlt(catch$date, format = date_format_effort)$yday
 
+# subset effort to be within the biweek bounds
+effort <- effort[c(effort$julian_day >= min(biweek[1]) & 
+                     effort$julian_day <= max(biweek)), ]
+catch <- catch[c(catch$julian_day >= min(biweek[1]) & 
+                   catch$julian_day <= max(biweek)), ]
+
 # add year
 effort$year <- as.integer(format(as.Date(effort$date, 
                                          format = date_format_effort), "%Y"))
@@ -82,9 +88,12 @@ effort <- effort %>%
 effort_unique <- effort %>%
   group_by(biweek, year) %>%
   tally()
-effort_unique_type <- effort %>%
-  group_by(biweek, year, trap_type) %>%
-  tally()
+
+# remove effort data with one trap
+one_trap <- which(effort_unique$n == 1)
+effort <- effort[!c(effort$biweek == effort_unique[[one_trap, "biweek"]] & 
+                      effort$year == effort_unique[[one_trap, "year"]]), ]
+effort_unique <- effort_unique[-one_trap, ]
 
 # create new empty dataframe
 effort2 <- as.data.frame(matrix(NA, nrow = 0, ncol = ncol(effort) + 1))
@@ -145,13 +154,6 @@ occ_t <- as.integer(pairs$occ)
 occ_y <- as.integer(pairs$yidx)
 n_pair <- nrow(pairs)
 
-# the complement — occasions with no sampling
-all_pairs <- expand.grid(occ = 1:n_occ, yidx = 1:n_year)
-un <- all_pairs[!paste(all_pairs$occ, all_pairs$yidx) %in%
-                  paste(occ_t, occ_y), ]
-un_t <- as.integer(un$occ); un_y <- as.integer(un$yidx)
-n_un <- nrow(un)
-
 # map every row of effort2 to its pair index
 effort2$pair <- match(paste(effort2$occ, effort2$yidx),
                       paste(occ_t, occ_y))
@@ -162,9 +164,12 @@ effort2 <- effort2 %>%
   arrange(pair) %>%
   mutate(trap_j = row_number(), .by = pair)
 
+# get constants
 totalo <- as.integer(tabulate(effort2$pair, nbins = n_pair))
 ntrap  <- max(totalo)
 nsizes <- length(size_colnames)
+
+stopifnot(min(totalo) > 1, sum(totalo) == nrow(effort2))
 
 # ---- trap-type indicators and soak days: [pair, trap] ----
 make_index <- function(col) {

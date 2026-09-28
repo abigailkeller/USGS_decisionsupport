@@ -477,7 +477,7 @@ invisible(clusterEvalQ(cl, {
       for (k in 1:n_size) {
         tot <- sum(hazard[1:nobs, k])
         # 1 - exp(-P(captured at all))
-        p[k] <- 1 - exp(-sum(tot))
+        p[k] <- 1 - exp(-tot)
       }
       return(p)
     }
@@ -649,11 +649,11 @@ write_progress("saving", iter, iter, "Collecting posterior samples...")
 
 out <- clusterEvalQ(cl, as.mcmc(as.matrix(cmodel_mcmc$mvSamples)))
 
-# discard burnin
-lower <- iter / thin * 0.4
-upper <- iter / thin
-sequence <- seq(lower, upper, 1)
-out_sub <- lapply(out, function(chain) chain[sequence, ])
+# discard burn-in
+n_keep <- nrow(out[[1]])
+burnin <- floor(n_keep * 0.4)
+out_sub <- lapply(out, function(chain) chain[(burnin + 1):n_keep, , 
+                                             drop = FALSE])
 
 # save samples
 saveRDS(out_sub, output_path)
