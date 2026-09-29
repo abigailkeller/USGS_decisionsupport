@@ -135,17 +135,20 @@ effort2 <- left_join(effort2, catch_total,
   replace(is.na(.), 0)
 
 # global occasion axis: every biweek sampled in ANY year
-occasions <- sort(unique(effort2$biweek))
-n_occ     <- length(occasions)
-years     <- sort(unique(effort2$year))
-n_year    <- length(years)
+n_occ <- length(biweek)
+occasions <- seq_len(biweek)
+years <- sort(unique(effort2$year))
+n_year <- length(years)
 
-effort2$occ  <- match(effort2$biweek, occasions)
-effort2$yidx <- match(effort2$year,   years)
+effort2$occ <- effort2$biweek 
+effort2$yidx <- match(effort2$year, years)
 
-# D is now a vector: same calendar date for occasion t in every year
-D <- biweek[occasions] / 365 
+stopifnot(all(effort2$occ >= 1), all(effort2$occ <= n_occ))
+
+# D - fraction of year
+D <- biweek / 365
 D <- D - min(D)
+stopifnot(length(D) == n_occ)
 
 # which (t, y) pairs were actually sampled
 pairs <- unique(effort2[, c("occ", "yidx")])

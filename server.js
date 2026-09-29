@@ -8,7 +8,7 @@ const STAGING_DIR = path.join(ROOT, 'data', 'staging');
 const MODEL_DATA_DIR = path.join(ROOT, 'data', 'model_data');
 const POSTERIOR_DIR = path.join(ROOT, 'data', 'posterior_samples');
 const PROGRESS_PATH = path.join(POSTERIOR_DIR, 'progress.json');
-const OUTPUT_PATH = path.join(POSTERIOR_DIR, 'onepulse.rds');
+const OUTPUT_PATH = path.join(POSTERIOR_DIR, 'twopulse.rds');
 const PORT = process.env.PORT || 8000;
 // matches formatDateForExport() in script.js, which always writes dates in this shape
 const EXPORT_DATE_FORMAT = '%m/%d/%Y';
@@ -113,7 +113,7 @@ function handleRunModel(req, res) {
     modelRunInProgress = true;
 
     const child = spawn('Rscript', [
-      'util_code/model_code_1pulse.R',
+      'util_code/run_model.R',
       MODEL_DATA_DIR,
       OUTPUT_PATH,
       PROGRESS_PATH,
