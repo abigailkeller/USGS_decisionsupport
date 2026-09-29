@@ -53,7 +53,7 @@ s_index <- readRDS(file.path(data_dir, "s_index.rds"))
 
 # get recruit intro
 recruit_intro1 <- recruit_intro2 <- rep(0, length(D))
-recruit_intro1[1] <- 1
+recruit_intro1[2] <- 1
 recruit_intro2[6] <- 1
 
 # read in IPM constants
