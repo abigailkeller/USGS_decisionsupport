@@ -602,6 +602,66 @@ function renderSvgChart(mountId, points, opts) {
   attachChartInteractions(mount);
 }
 
+function renderBarChart(mountId, categories, values, opts) {
+  const mount = document.querySelector(`#${mountId}`);
+  if (!mount) return;
+  const hasData = categories.length > 0 && values.some((v) => v && Number.isFinite(v.value));
+  if (!hasData) {
+    mount.innerHTML = `<p class="chart-empty">${escapeHtml(opts.emptyMessage || 'No data to display.')}</p>`;
+    return;
+  }
+
+  const width = 440;
+  const height = 240;
+  const margin = { top: 12, right: 16, bottom: 32, left: 46 };
+  const innerWidth = width - margin.left - margin.right;
+  const innerHeight = height - margin.top - margin.bottom;
+  const lineColor = cssVar('--line');
+  const mutedColor = cssVar('--muted');
+  const color = opts.color || '#4a9974';
+
+  const maxY = Math.max(0, ...values.map((v) => (v && Number.isFinite(v.hi ?? v.value)) ? (v.hi ?? v.value) : 0));
+  const yTicks = niceAxisTicks(0, maxY, 4);
+  const xTicks = niceAxisTicks(categories[0], categories[categories.length - 1], 4);
+  const yScale = (y) => margin.top + innerHeight - ((y - yTicks[0]) / (yTicks[yTicks.length - 1] - yTicks[0] || 1)) * innerHeight;
+  const xScale = (x) => margin.left + ((x - categories[0]) / (categories[categories.length - 1] - categories[0] || 1)) * innerWidth;
+  const barWidth = Math.max(2, innerWidth / categories.length - 2);
+
+  const gridLines = yTicks.map((tick) => `<line x1="${margin.left}" x2="${width - margin.right}" y1="${yScale(tick)}" y2="${yScale(tick)}" stroke="${lineColor}" stroke-width="1" />`).join('');
+  const yAxisLabels = yTicks.map((tick) => `<text x="${margin.left - 8}" y="${yScale(tick) + 3}" text-anchor="end" font-size="9" fill="${mutedColor}">${formatAxisNumber(tick)}</text>`).join('');
+  const xAxisLabels = xTicks.map((tick) => `<text x="${xScale(tick)}" y="${height - margin.bottom + 16}" text-anchor="middle" font-size="9" fill="${mutedColor}">${formatAxisNumber(tick)}</text>`).join('');
+
+  let bars = '';
+  categories.forEach((cat, i) => {
+    const v = values[i];
+    if (!v || !Number.isFinite(v.value)) return;
+    const barX = xScale(cat) - barWidth / 2;
+    const barY = yScale(v.value);
+    const barH = Math.max(0, yScale(0) - barY);
+    const tooltip = `${opts.xLabel}: ${formatAxisNumber(cat)}\n${opts.yLabel}: ${formatTooltipNumber(v.value)}`;
+    bars += `<rect class="chart-point" x="${barX}" y="${barY}" width="${barWidth}" height="${barH}" fill="${color}" data-tooltip="${escapeHtml(tooltip)}"></rect>`;
+    if (Number.isFinite(v.lo) && Number.isFinite(v.hi)) {
+      const xCenter = xScale(cat);
+      const yLo = yScale(v.lo);
+      const yHi = yScale(v.hi);
+      bars += `<line x1="${xCenter}" x2="${xCenter}" y1="${yHi}" y2="${yLo}" stroke="#30302e" stroke-width="1.5" /><line x1="${xCenter - 3}" x2="${xCenter + 3}" y1="${yHi}" y2="${yHi}" stroke="#30302e" stroke-width="1.5" /><line x1="${xCenter - 3}" x2="${xCenter + 3}" y1="${yLo}" y2="${yLo}" stroke="#30302e" stroke-width="1.5" />`;
+    }
+  });
+
+  mount.innerHTML = `<svg viewBox="0 0 ${width} ${height}" font-family="'DM Sans', Arial, sans-serif" role="img" aria-label="${escapeHtml(opts.yLabel)} by ${escapeHtml(opts.xLabel)}">
+    ${gridLines}
+    <line x1="${margin.left}" x2="${margin.left}" y1="${margin.top}" y2="${height - margin.bottom}" stroke="${lineColor}" />
+    <line x1="${margin.left}" x2="${width - margin.right}" y1="${height - margin.bottom}" y2="${height - margin.bottom}" stroke="${lineColor}" />
+    ${yAxisLabels}
+    ${xAxisLabels}
+    ${bars}
+    <text x="${margin.left + innerWidth / 2}" y="${height - 4}" text-anchor="middle" font-size="10" fill="${mutedColor}">${escapeHtml(opts.xLabel)}</text>
+    <text x="12" y="${margin.top + innerHeight / 2}" text-anchor="middle" font-size="10" fill="${mutedColor}" transform="rotate(-90 12 ${margin.top + innerHeight / 2})">${escapeHtml(opts.yLabel)}</text>
+  </svg>`;
+
+  attachChartInteractions(mount);
+}
+
 function populateYearSelects() {
   const years = getAvailableYears();
   if (selectedVisualizationYear !== 'all' && !years.includes(selectedVisualizationYear)) selectedVisualizationYear = 'all';
@@ -759,6 +819,7 @@ function pollModelProgress() {
           copy.textContent = 'Saving posterior samples';
           bar.style.width = '100%';
           document.querySelector('#regime-download-button').hidden = false;
+          document.querySelector('#analyze-card').hidden = false;
         }
       }
     }).catch(() => {});
@@ -775,6 +836,9 @@ document.querySelector('#regime-run-button').addEventListener('click', (event) =
 
   errorEl.hidden = true;
   document.querySelector('#regime-download-button').hidden = true;
+  document.querySelector('#analyze-card').hidden = true;
+  document.querySelector('#analyze-results-panel').hidden = true;
+  analyzeData = null;
   button.disabled = true;
   ring.classList.remove('is-done');
   bar.style.width = '0%';
@@ -806,6 +870,116 @@ document.querySelector('#regime-run-button').addEventListener('click', (event) =
     const result = await parseJsonResponse(response);
     if (!response.ok) throw new Error(result.error || 'Could not start the model run.');
     pollModelProgress();
+  }).catch((error) => {
+    showError(errorEl, error.message);
+    button.disabled = false;
+  });
+});
+
+let analyzeData = null;
+let analyzeProgressTimer = null;
+
+function populateAnalysisControls() {
+  const yearSelect = document.querySelector('#analyze-year-select');
+  yearSelect.innerHTML = analyzeData.years.map((year, index) => `<option value="${index + 1}">${year}</option>`).join('');
+  const timeSlider = document.querySelector('#analyze-time-slider');
+  timeSlider.min = '1';
+  timeSlider.max = String(analyzeData.nOcc);
+  timeSlider.value = '1';
+}
+
+function renderAnalysisCharts() {
+  if (!analyzeData) return;
+  const yearIndex = Number(document.querySelector('#analyze-year-select').value) - 1;
+  const timeIndex = Number(document.querySelector('#analyze-time-slider').value) - 1;
+  document.querySelector('#analyze-time-label').textContent = `Julian day ${analyzeData.biweek[timeIndex]}`;
+
+  const sizeCategories = analyzeData.x;
+  const nMed = analyzeData.N_med[timeIndex][yearIndex];
+  const nLo = analyzeData.N_lo[timeIndex][yearIndex];
+  const nHi = analyzeData.N_hi[timeIndex][yearIndex];
+  const abundanceValues = sizeCategories.map((_, i) => ({ value: nMed[i], lo: nLo[i], hi: nHi[i] }));
+  renderBarChart('chart-abundance', sizeCategories, abundanceValues, {
+    xLabel: 'carapace width (mm)', yLabel: 'estimated abundance', color: '#4a9974',
+  });
+
+  const cpueVals = analyzeData.cpue[timeIndex][yearIndex];
+  const cpueValues = sizeCategories.map((_, i) => ({ value: cpueVals[i] }));
+  renderBarChart('chart-cpue-size', sizeCategories, cpueValues, {
+    xLabel: 'carapace width (mm)', yLabel: 'captured crabs / trap (CPUE)', color: '#c9932b',
+    emptyMessage: 'No observations for this year and time period.',
+  });
+}
+
+document.querySelector('#analyze-year-select').addEventListener('change', renderAnalysisCharts);
+document.querySelector('#analyze-time-slider').addEventListener('input', renderAnalysisCharts);
+
+function pollAnalyzeProgress() {
+  const ring = document.querySelector('#analyze-run-ring');
+  const title = document.querySelector('#analyze-run-title');
+  const copy = document.querySelector('#analyze-run-copy');
+  const bar = document.querySelector('#analyze-run-bar');
+  const errorEl = document.querySelector('#analyze-run-error');
+  const button = document.querySelector('#analyze-run-button');
+  const panel = document.querySelector('#analyze-results-panel');
+
+  const PHASE_LABELS = { preparing: 'Preparing data', compiling: 'Building and compiling the model', simulating: 'Simulating', saving: 'Saving results' };
+
+  clearInterval(analyzeProgressTimer);
+  analyzeProgressTimer = setInterval(() => {
+    fetch('api/analyze-results/progress').then((response) => response.json()).then((progress) => {
+      const percent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+      bar.style.width = `${percent}%`;
+      title.textContent = PHASE_LABELS[progress.phase] || 'Running';
+      copy.textContent = progress.message || '';
+      if (progress.done) {
+        clearInterval(analyzeProgressTimer);
+        button.disabled = false;
+        if (progress.error) {
+          showError(errorEl, progress.error);
+          title.textContent = 'Analysis failed';
+          return;
+        }
+        ring.classList.add('is-done');
+        title.textContent = 'Analysis complete';
+        copy.textContent = 'Explore estimated abundance and CPUE by year and time period.';
+        bar.style.width = '100%';
+        fetch('api/analyze-results/data').then((response) => parseJsonResponse(response)).then((data) => {
+          analyzeData = data;
+          populateAnalysisControls();
+          panel.hidden = false;
+          renderAnalysisCharts();
+        }).catch((error) => showError(errorEl, error.message));
+      }
+    }).catch(() => {});
+  }, 1500);
+}
+
+document.querySelector('#analyze-run-button').addEventListener('click', (event) => {
+  const button = event.currentTarget;
+  const ring = document.querySelector('#analyze-run-ring');
+  const title = document.querySelector('#analyze-run-title');
+  const copy = document.querySelector('#analyze-run-copy');
+  const bar = document.querySelector('#analyze-run-bar');
+  const errorEl = document.querySelector('#analyze-run-error');
+  const panel = document.querySelector('#analyze-results-panel');
+
+  errorEl.hidden = true;
+  panel.hidden = true;
+  button.disabled = true;
+  ring.classList.remove('is-done');
+  bar.style.width = '0%';
+  title.textContent = 'Building and compiling the model';
+  copy.textContent = 'This can take a minute the first time.';
+
+  fetch('api/analyze-results', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  }).then(async (response) => {
+    const result = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(result.error || 'Could not start the analysis.');
+    pollAnalyzeProgress();
   }).catch((error) => {
     showError(errorEl, error.message);
     button.disabled = false;

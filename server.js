@@ -9,6 +9,8 @@ const MODEL_DATA_DIR = path.join(ROOT, 'data', 'model_data');
 const POSTERIOR_DIR = path.join(ROOT, 'data', 'posterior_samples');
 const PROGRESS_PATH = path.join(POSTERIOR_DIR, 'progress.json');
 const OUTPUT_PATH = path.join(POSTERIOR_DIR, 'twopulse.rds');
+const ANALYZE_PROGRESS_PATH = path.join(POSTERIOR_DIR, 'analyze_progress.json');
+const ANALYZE_OUTPUT_PATH = path.join(POSTERIOR_DIR, 'simulated_dynamics.json');
 const PORT = process.env.PORT || 8000;
 // matches formatDateForExport() in script.js, which always writes dates in this shape
 const EXPORT_DATE_FORMAT = '%m/%d/%Y';
@@ -24,6 +26,7 @@ const MIME_TYPES = {
 };
 
 let modelRunInProgress = false;
+let analysisInProgress = false;
 
 function csvField(value) {
   const stringValue = String(value ?? '');
@@ -153,12 +156,71 @@ function handleDownload(req, res) {
   });
 }
 
+function handleAnalyzeResults(req, res) {
+  if (analysisInProgress) {
+    return sendJson(res, 409, { error: 'An analysis run is already in progress.' });
+  }
+  if (!fs.existsSync(OUTPUT_PATH)) {
+    return sendJson(res, 400, { error: 'No posterior samples found. Run the population model first.' });
+  }
+  readBody(req).then((raw) => {
+    let payload = {};
+    try {
+      payload = raw ? JSON.parse(raw) : {};
+    } catch (error) {
+      payload = {};
+    }
+    const nDraw = Number.isFinite(payload.nDraw) ? Math.max(1, Math.round(payload.nDraw)) : 200;
+
+    if (fs.existsSync(ANALYZE_PROGRESS_PATH)) fs.rmSync(ANALYZE_PROGRESS_PATH, { force: true });
+    analysisInProgress = true;
+
+    const child = spawn('Rscript', [
+      'util_code/simulate_dynamics.R',
+      MODEL_DATA_DIR,
+      OUTPUT_PATH,
+      ANALYZE_OUTPUT_PATH,
+      ANALYZE_PROGRESS_PATH,
+      String(nDraw),
+    ], { cwd: ROOT, detached: true, stdio: 'ignore' });
+    child.unref();
+    child.on('exit', () => { analysisInProgress = false; });
+
+    sendJson(res, 200, { started: true });
+  }).catch((error) => {
+    analysisInProgress = false;
+    sendJson(res, 400, { error: error.message });
+  });
+}
+
+function handleAnalyzeProgress(req, res) {
+  fs.readFile(ANALYZE_PROGRESS_PATH, 'utf8', (err, content) => {
+    if (err) return sendJson(res, 200, { phase: 'idle', completed: 0, total: 0, done: false, error: null });
+    try {
+      sendJson(res, 200, JSON.parse(content));
+    } catch (error) {
+      sendJson(res, 200, { phase: 'idle', completed: 0, total: 0, done: false, error: null });
+    }
+  });
+}
+
+function handleAnalyzeData(req, res) {
+  fs.readFile(ANALYZE_OUTPUT_PATH, 'utf8', (err, content) => {
+    if (err) { res.writeHead(404); res.end('No analysis results found. Run the analysis first.'); return; }
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(content);
+  });
+}
+
 const server = http.createServer((req, res) => {
   const { pathname } = new URL(req.url, `http://${req.headers.host}`);
   if (req.method === 'POST' && pathname === '/api/prepare-data') return handlePrepareData(req, res);
   if (req.method === 'POST' && pathname === '/api/run-model') return handleRunModel(req, res);
   if (req.method === 'GET' && pathname === '/api/run-model/progress') return handleProgress(req, res);
   if (req.method === 'GET' && pathname === '/api/run-model/download') return handleDownload(req, res);
+  if (req.method === 'POST' && pathname === '/api/analyze-results') return handleAnalyzeResults(req, res);
+  if (req.method === 'GET' && pathname === '/api/analyze-results/progress') return handleAnalyzeProgress(req, res);
+  if (req.method === 'GET' && pathname === '/api/analyze-results/data') return handleAnalyzeData(req, res);
   if (req.method === 'GET') return serveStatic(req, res, pathname);
   res.writeHead(405);
   res.end('Method not allowed');

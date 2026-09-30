@@ -4,6 +4,8 @@ library(parallel)
 library(expm)
 library(jsonlite)
 
+source("util_code/build_model_inputs.R")
+
 # command-line args: <data_dir> <output_path> <progress_path> <iter> <thin> <nchains>
 # falls back to the original standalone defaults when run with no args
 args <- commandArgs(trailingOnly = TRUE)
@@ -34,114 +36,12 @@ run_model <- function() {
 
 write_progress("preparing", 0, iter, "Loading prepared model data...")
 
-# read in time series data
-C <- readRDS(file.path(data_dir, "counts.rds"))
-C_T <- readRDS(file.path(data_dir, "ncap.rds"))
-
-# read in time series constants
-n_occ <- readRDS(file.path(data_dir, "n_occ.rds"))
-n_year <- readRDS(file.path(data_dir, "n_year.rds"))
-n_pair <- readRDS(file.path(data_dir, "n_pair.rds"))
-occ_t <- readRDS(file.path(data_dir, "occ_t.rds"))
-occ_y <- readRDS(file.path(data_dir, "occ_y.rds"))
-D <- readRDS(file.path(data_dir, "D.rds"))
-totalo <- readRDS(file.path(data_dir, "totalo.rds"))
-soak_days <- readRDS(file.path(data_dir, "soak_days.rds"))
-m_index <- readRDS(file.path(data_dir, "m_index.rds"))
-f_index <- readRDS(file.path(data_dir, "f_index.rds"))
-s_index <- readRDS(file.path(data_dir, "s_index.rds"))
-
-# get recruit intro
-recruit_intro1 <- recruit_intro2 <- rep(0, length(D))
-recruit_intro1[2] <- 1
-recruit_intro2[6] <- 1
-
-# read in IPM constants
-b <- readRDS(file.path(data_dir, "b.rds"))
-x <- readRDS(file.path(data_dir, "x.rds"))
-
-
-# bundle up data and constants
-constants <- list(
-  # number of years
-  n_year = n_year,
-  # number of trap occasions (t)
-  n_occ = n_occ,
-  # number of year/trapping occasion pairs
-  n_pair = n_pair,
-  # t associated with pairs
-  occ_t = occ_t,
-  # y associated with pairs
-  occ_y = occ_y,
-  # number of trap obs in year y, time t
-  totalo = totalo,
-  # number of sizes in IPM mesh
-  n_size = length(x),
-  # upper bounds in IPM mesh
-  upper = b[2:length(b)],
-  # lower bounds in IPM mesh
-  lower = b[1:length(x)],
-  # binary indicator of fukui traps in time t, obs j, year i
-  f_index = f_index,
-  # binary indicator of minnow traps in time t, obs j, year i
-  m_index = m_index,
-  # binary indicator of shrimp traps in time t, obs j, year i
-  s_index = s_index,
-  # midpoints in IPM mesh
-  x = x,
-  # calendar date indices (fraction of year) in time t
-  D = D,
-  # number of soak days for each trap at time t, trap j, year i
-  soak_days = soak_days,
-  # data structure to introduce recruits into the model at t = 2
-  recruit_intro1 = recruit_intro1,
-  # data structure to introduce recruits into the model at t = 6
-  recruit_intro2 = recruit_intro2,
-  pi = pi
-)
-
-data <- list(
-  # total harvested within at time t, year y, size x
-  C_T = C_T,
-  # harvest count at time t, year y, trap j, size x
-  C = C
-)
-
-# set up initial values
-# crude capture probability from the fixed selectivity parameters
-haz_one <- function(x) {                       # per-trap-day hazard by size
-  0.0001784 / (1 + exp(-0.4977 * (x - 35.34))) +      # fukui
-    0.003937  / (1 + exp(-0.3437 * (x - 46.41))) +      # shrimp
-    0.0003912 * exp(-(x - 45.12)^2 / (2 * 6.449^2))     # minnow
-}
-# average traps per occasion, times occasions per year
-traps_per_year <- tapply(totalo, occ_y, sum)
-p_year <- sapply(traps_per_year, function(nt) 1 - exp(-nt * haz_one(x)))
-
-catch_year <- apply(C_T, c(2, 3), sum) 
-
-# implied abundance needed, with a safety factor
-lambda_floor <- sapply(seq_len(n_year), function(yy) {
-  needed <- catch_year[yy, ] / pmax(p_year[, yy], 1e-6)
-  sum(needed, na.rm = TRUE) * 3
-})
-
-# initial values
-inits <- function() {
-  list(
-    prop_1 = 0.1,
-    h_M_max = 0.0003912, 
-    h_F_max = 0.0001784, 
-    h_S_max = 0.003937, 
-    log_mu_A = 4, sigma_A = 0.2,
-    lambda_A = pmax(lambda_floor, 1000), 
-    lambda_R = pmax(lambda_floor, 1000), 
-    mu_lambda_A = mean(log(pmax(lambda_floor, 1000))), 
-    mu_lambda_R = mean(log(pmax(lambda_floor, 1000))),
-    sigma_lambda_A = max(sd(log(pmax(lambda_floor, 1000))), 0.2), 
-    sigma_lambda_R = max(sd(log(pmax(lambda_floor, 1000))), 0.2)
-  )
-}
+model_inputs <- build_model_inputs(data_dir)
+constants <- model_inputs$constants
+data <- model_inputs$data
+inits <- model_inputs$inits
+n_year <- model_inputs$n_year
+lambda_floor <- model_inputs$lambda_floor
 
 ########################
 # run MCMC in parallel #

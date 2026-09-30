@@ -1,5 +1,7 @@
 library(tidyverse)
 
+source("util_code/constants.R")
+
 # command-line args: <catch_csv> <effort_csv> <output_dir> <catch_date_format> <effort_date_format>
 # date formats use R's strptime/as.Date tokens (e.g. "%m/%d/%Y", "%Y-%m-%d")
 # falls back to the bundled sample data when run with no args (unchanged
@@ -24,9 +26,6 @@ size_colnames <- rep(NA, length(b) - 1)
 for(i in 1:(length(b) - 1)){
   size_colnames[i] <- paste0("s", b[i], "_", b[i + 1])
 }
-
-biweek <- c(59, 76, 91, 106, 121, 137, 152, 167, 182, 198, 213, 229, 
-            244, 259, 274, 290, 305, 320, 335)
 
 # read in sample data
 catch <- read.csv(catch_path)
@@ -89,11 +88,15 @@ effort_unique <- effort %>%
   group_by(biweek, year) %>%
   tally()
 
-# remove effort data with one trap
-one_trap <- which(effort_unique$n == 1)
-effort <- effort[!c(effort$biweek == effort_unique[[one_trap, "biweek"]] & 
-                      effort$year == effort_unique[[one_trap, "year"]]), ]
-effort_unique <- effort_unique[-one_trap, ]
+# remove effort data from biweek/year combinations with only one trap (a
+# single trap can't identify a capture probability for that occasion/year)
+one_trap <- effort_unique[effort_unique$n == 1, c("biweek", "year")]
+if (nrow(one_trap) > 0) {
+  effort_key <- paste(effort$biweek, effort$year)
+  one_trap_key <- paste(one_trap$biweek, one_trap$year)
+  effort <- effort[!effort_key %in% one_trap_key, ]
+  effort_unique <- effort_unique[effort_unique$n != 1, ]
+}
 
 # create new empty dataframe
 effort2 <- as.data.frame(matrix(NA, nrow = 0, ncol = ncol(effort) + 1))
@@ -213,6 +216,7 @@ saveRDS(f_index, file.path(output_dir, "f_index.rds"))
 saveRDS(s_index, file.path(output_dir, "s_index.rds"))
 saveRDS(n_occ, file.path(output_dir, "n_occ.rds"))
 saveRDS(n_year, file.path(output_dir, "n_year.rds"))
+saveRDS(years, file.path(output_dir, "years.rds"))
 saveRDS(n_pair, file.path(output_dir, "n_pair.rds"))
 saveRDS(occ_t, file.path(output_dir, "occ_t.rds"))
 saveRDS(occ_y, file.path(output_dir, "occ_y.rds"))
