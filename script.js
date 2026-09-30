@@ -338,6 +338,7 @@ function handleFile(kind, file) {
 function canEnterStep(step) {
   if (step <= 2) return true;
   if (!uploadedData.catch || !uploadedData.effort || !document.querySelector('#data-confirmed').checked) return false;
+  if (step >= 5 && document.querySelector('#regime-next-button').disabled) return false;
   if (step >= 7 && document.querySelector('#training-next').disabled) return false;
   return true;
 }
@@ -738,6 +739,12 @@ document.querySelectorAll('.next-button').forEach((button) => button.addEventLis
   if (button.classList.contains('gated-next') && !button.closest('.step-view').querySelector('.step-check').checked) return;
   goToStep(nextStep);
 }));
+document.querySelector('#regime-next-button').addEventListener('click', () => {
+  // release the parked model process (if the analyze-results step never
+  // consumed it, e.g. it fell back to a standalone run) now that the user is
+  // moving on and won't need to reuse it
+  fetch('api/run-model/release', { method: 'POST' }).catch(() => {});
+});
 document.querySelectorAll('.back-button-control').forEach((button) => button.addEventListener('click', () => goToStep(Number(button.dataset.back))));
 stepLinks.forEach((link) => link.addEventListener('click', () => goToStep(Number(link.dataset.step))));
 
@@ -837,7 +844,9 @@ document.querySelector('#regime-run-button').addEventListener('click', (event) =
   errorEl.hidden = true;
   document.querySelector('#regime-download-button').hidden = true;
   document.querySelector('#analyze-card').hidden = true;
+  document.querySelector('#analyze-controls').hidden = true;
   document.querySelector('#analyze-results-panel').hidden = true;
+  document.querySelector('#regime-next-button').disabled = true;
   analyzeData = null;
   button.disabled = true;
   ring.classList.remove('is-done');
@@ -903,6 +912,11 @@ function renderAnalysisCharts() {
     xLabel: 'carapace width (mm)', yLabel: 'estimated abundance', color: '#4a9974',
   });
 
+  const totalMed = analyzeData.tot_med[timeIndex][yearIndex];
+  const totalLo = analyzeData.tot_lo[timeIndex][yearIndex];
+  const totalHi = analyzeData.tot_hi[timeIndex][yearIndex];
+  document.querySelector('#abundance-total-label').textContent = `Total: ${Math.round(totalMed)} (${Math.round(totalLo)}, ${Math.round(totalHi)} 95% CrI)`;
+
   const cpueVals = analyzeData.cpue[timeIndex][yearIndex];
   const cpueValues = sizeCategories.map((_, i) => ({ value: cpueVals[i] }));
   renderBarChart('chart-cpue-size', sizeCategories, cpueValues, {
@@ -947,8 +961,10 @@ function pollAnalyzeProgress() {
         fetch('api/analyze-results/data').then((response) => parseJsonResponse(response)).then((data) => {
           analyzeData = data;
           populateAnalysisControls();
+          document.querySelector('#analyze-controls').hidden = false;
           panel.hidden = false;
           renderAnalysisCharts();
+          document.querySelector('#regime-next-button').disabled = false;
         }).catch((error) => showError(errorEl, error.message));
       }
     }).catch(() => {});
@@ -969,8 +985,8 @@ document.querySelector('#analyze-run-button').addEventListener('click', (event) 
   button.disabled = true;
   ring.classList.remove('is-done');
   bar.style.width = '0%';
-  title.textContent = 'Building and compiling the model';
-  copy.textContent = 'This can take a minute the first time.';
+  title.textContent = 'Starting analysis';
+  copy.textContent = 'Checking whether the compiled model can be reused...';
 
   fetch('api/analyze-results', {
     method: 'POST',
@@ -979,6 +995,12 @@ document.querySelector('#analyze-run-button').addEventListener('click', (event) 
   }).then(async (response) => {
     const result = await parseJsonResponse(response);
     if (!response.ok) throw new Error(result.error || 'Could not start the analysis.');
+    if (result.reused) {
+      copy.textContent = 'Reusing the already-compiled model from the population model run.';
+    } else {
+      title.textContent = 'Building and compiling the model';
+      copy.textContent = 'This can take a minute the first time.';
+    }
     pollAnalyzeProgress();
   }).catch((error) => {
     showError(errorEl, error.message);

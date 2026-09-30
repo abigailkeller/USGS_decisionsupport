@@ -27,6 +27,11 @@ const MIME_TYPES = {
 
 let modelRunInProgress = false;
 let analysisInProgress = false;
+// The run-model child process, if it's still alive and waiting (after
+// finishing its MCMC run) for an "ANALYZE" command on its stdin. Reusing it
+// skips recompiling the model for the analyze-results step. Always null
+// unless a run-model process is specifically parked waiting for reuse.
+let modelChild = null;
 
 function csvField(value) {
   const stringValue = String(value ?? '');
@@ -112,6 +117,10 @@ function handleRunModel(req, res) {
     const thin = Number.isFinite(payload.thin) ? Math.max(1, Math.round(payload.thin)) : 10;
     const nchains = 2;
 
+    // a prior run's process may still be parked waiting for an ANALYZE
+    // command that never came; starting a new run supersedes it
+    if (modelChild) { modelChild.kill(); modelChild = null; }
+
     if (fs.existsSync(PROGRESS_PATH)) fs.rmSync(PROGRESS_PATH, { force: true });
     modelRunInProgress = true;
 
@@ -123,9 +132,13 @@ function handleRunModel(req, res) {
       String(iter),
       String(thin),
       String(nchains),
-    ], { cwd: ROOT, detached: true, stdio: 'ignore' });
-    child.unref();
-    child.on('exit', () => { modelRunInProgress = false; });
+    ], { cwd: ROOT, stdio: ['pipe', 'ignore', 'ignore'] });
+    child.stdin.on('error', () => {}); // ignore EPIPE if it exits before we write to it
+    modelChild = child;
+    child.on('exit', () => {
+      modelRunInProgress = false;
+      if (modelChild === child) modelChild = null;
+    });
 
     sendJson(res, 200, { started: true });
   }).catch((error) => {
@@ -156,6 +169,16 @@ function handleDownload(req, res) {
   });
 }
 
+function canReuseCompiledModel() {
+  if (!modelChild) return false;
+  try {
+    const progress = JSON.parse(fs.readFileSync(PROGRESS_PATH, 'utf8'));
+    return progress.phase === 'done' && !progress.error;
+  } catch (error) {
+    return false;
+  }
+}
+
 function handleAnalyzeResults(req, res) {
   if (analysisInProgress) {
     return sendJson(res, 409, { error: 'An analysis run is already in progress.' });
@@ -175,6 +198,17 @@ function handleAnalyzeResults(req, res) {
     if (fs.existsSync(ANALYZE_PROGRESS_PATH)) fs.rmSync(ANALYZE_PROGRESS_PATH, { force: true });
     analysisInProgress = true;
 
+    if (canReuseCompiledModel()) {
+      // Hand this one request to the still-running run-model process, which
+      // already has a compiled model sitting in memory -- skips recompiling
+      // entirely. It exits on its own once this request is fulfilled.
+      const reusedChild = modelChild;
+      modelChild = null;
+      reusedChild.on('exit', () => { analysisInProgress = false; });
+      reusedChild.stdin.write(`ANALYZE\t${OUTPUT_PATH}\t${ANALYZE_OUTPUT_PATH}\t${ANALYZE_PROGRESS_PATH}\t${nDraw}\n`);
+      return sendJson(res, 200, { started: true, reused: true });
+    }
+
     const child = spawn('Rscript', [
       'util_code/simulate_dynamics.R',
       MODEL_DATA_DIR,
@@ -186,7 +220,7 @@ function handleAnalyzeResults(req, res) {
     child.unref();
     child.on('exit', () => { analysisInProgress = false; });
 
-    sendJson(res, 200, { started: true });
+    sendJson(res, 200, { started: true, reused: false });
   }).catch((error) => {
     analysisInProgress = false;
     sendJson(res, 400, { error: error.message });
@@ -212,12 +246,19 @@ function handleAnalyzeData(req, res) {
   });
 }
 
+function handleReleaseModel(req, res) {
+  const released = Boolean(modelChild);
+  if (modelChild) { modelChild.kill(); modelChild = null; }
+  sendJson(res, 200, { released });
+}
+
 const server = http.createServer((req, res) => {
   const { pathname } = new URL(req.url, `http://${req.headers.host}`);
   if (req.method === 'POST' && pathname === '/api/prepare-data') return handlePrepareData(req, res);
   if (req.method === 'POST' && pathname === '/api/run-model') return handleRunModel(req, res);
   if (req.method === 'GET' && pathname === '/api/run-model/progress') return handleProgress(req, res);
   if (req.method === 'GET' && pathname === '/api/run-model/download') return handleDownload(req, res);
+  if (req.method === 'POST' && pathname === '/api/run-model/release') return handleReleaseModel(req, res);
   if (req.method === 'POST' && pathname === '/api/analyze-results') return handleAnalyzeResults(req, res);
   if (req.method === 'GET' && pathname === '/api/analyze-results/progress') return handleAnalyzeProgress(req, res);
   if (req.method === 'GET' && pathname === '/api/analyze-results/data') return handleAnalyzeData(req, res);
