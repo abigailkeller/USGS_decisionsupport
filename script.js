@@ -49,6 +49,7 @@ function renderPreview(kind, file, rows) {
   let preview = card.querySelector('.data-preview');
   if (!preview) { preview = document.createElement('div'); preview.className = 'data-preview'; card.append(preview); }
   let previewHeaders = headers;
+  let selectedIndexes = headers.map((_, index) => index);
   const selectionConfig = {
     catch: [
       { key: 'date', label: 'Date column', pattern: /date|time/i, dateFormat: true },
@@ -93,15 +94,26 @@ function renderPreview(kind, file, rows) {
       }
     });
     if (!selection.dataset.bound) {
-      selection.addEventListener('change', () => { resetQualityChecks(); renderPreview(kind, file, rows); });
+      // Reads the CURRENT upload from uploadedData rather than closing over
+      // this render's `file`/`rows` params, since this listener is bound
+      // only once per card and must keep working after the user replaces
+      // the file with a different one later.
+      selection.addEventListener('change', () => {
+        resetQualityChecks();
+        renderPreview(kind, uploadedData[kind].file, uploadedData[kind].rows);
+      });
       selection.dataset.bound = 'true';
     }
-    previewHeaders = fields.map((field) => {
-      const selectedValue = selection.querySelector(`#${kind}-${field.key}-column`).value;
-      return selectedValue === '' ? '' : headers[Number(selectedValue)];
+    // Built from the selects' own values (not a header-name lookup) so a
+    // blank-named column in the source CSV (e.g. R's write.csv row-index
+    // column) can never be mistaken for "no column selected here".
+    selectedIndexes = fields.map((field) => {
+      const value = selection.querySelector(`#${kind}-${field.key}-column`).value;
+      return value === '' ? -1 : Number(value);
     });
+    previewHeaders = selectedIndexes.map((index) => (index === -1 ? '' : headers[index]));
   }
-  const selectedIndexes = previewHeaders.map((header) => headers.indexOf(header));
+  const allColumnsChosen = selectedIndexes.every((index) => index !== -1);
   let filteredRows = rows.slice(1);
   let removedRows = [];
   let removedTrapRows = 0;
@@ -138,7 +150,6 @@ function renderPreview(kind, file, rows) {
     removedDateRows = beforeDateFilter - filteredRows.length;
   }
   if (uploadedData[kind]) uploadedData[kind].filteredRows = filteredRows;
-  const dataRows = filteredRows.map((row) => selectedIndexes.map((index) => row[index] || ''));
   const selectedCount = previewHeaders.filter((header) => header !== '').length;
   summary.innerHTML = `<strong>${escapeHtml(file.name)}</strong><span>${filteredRows.length} rows · ${selectedCount} of ${previewHeaders.length} columns selected</span>`;
   const renderTable = (tableRows) => `<div class="data-preview-scroll"><table><thead><tr>${previewHeaders.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead><tbody>${tableRows.map((row) => `<tr>${selectedIndexes.map((index) => `<td>${escapeHtml(row[index] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
@@ -147,7 +158,10 @@ function renderPreview(kind, file, rows) {
   if (removedDateRows > 0) removalReasons.push(`${removedDateRows} rows were removed because their date didn't match the selected format.`);
   const removalMessage = removalReasons.length ? `${removalReasons.map((reason) => `<p class="filter-message">${reason}</p>`).join('')}<label class="removed-rows-toggle"><input type="checkbox" id="show-removed-rows"${card.dataset.showRemoved === 'true' ? ' checked' : ''}> Show removed rows</label>` : '';
   const removedPreview = removedRows.length > 0 && card.dataset.showRemoved === 'true' ? `<p class="removed-rows-heading">Removed rows (${removedRows.length})</p>${renderTable(removedRows)}` : '';
-  preview.innerHTML = `${removalMessage}<p>Preview (all ${dataRows.length} rows)</p>${renderTable(filteredRows)}${removedPreview}`;
+  const previewSection = allColumnsChosen
+    ? `<p>Preview (all ${filteredRows.length} rows)</p>${renderTable(filteredRows)}`
+    : `<p>Preview</p><p class="chart-empty">Select all columns above to see a preview.</p>`;
+  preview.innerHTML = `${removalMessage}${previewSection}${removedPreview}`;
   const removedToggle = preview.querySelector('#show-removed-rows');
   if (removedToggle) removedToggle.addEventListener('change', (event) => {
     card.dataset.showRemoved = String(event.target.checked);
@@ -527,6 +541,13 @@ function formatAxisNumber(value) {
   return Math.abs(value) >= 100 ? String(Math.round(value)) : String(Math.round(value * 10) / 10);
 }
 
+function formatSignificant(value, sigFigs) {
+  if (value === 0) return '0';
+  const magnitude = Math.floor(Math.log10(Math.abs(value)));
+  const factor = 10 ** (sigFigs - 1 - magnitude);
+  return String(Math.round(value * factor) / factor);
+}
+
 function formatDateShort(date) {
   return `${MONTH_ABBR[date.getMonth()]} ${date.getDate()}`;
 }
@@ -621,7 +642,10 @@ function renderBarChart(mountId, categories, values, opts) {
   const mutedColor = cssVar('--muted');
   const color = opts.color || '#4a9974';
 
-  const maxY = Math.max(0, ...values.map((v) => (v && Number.isFinite(v.hi ?? v.value)) ? (v.hi ?? v.value) : 0));
+  const maxY = Number.isFinite(opts.maxY)
+    ? opts.maxY
+    : Math.max(0, ...values.map((v) => (v && Number.isFinite(v.hi ?? v.value)) ? (v.hi ?? v.value) : 0));
+  const formatYAxis = opts.yAxisFormatter || formatAxisNumber;
   const yTicks = niceAxisTicks(0, maxY, 4);
   const xTicks = niceAxisTicks(categories[0], categories[categories.length - 1], 4);
   const yScale = (y) => margin.top + innerHeight - ((y - yTicks[0]) / (yTicks[yTicks.length - 1] - yTicks[0] || 1)) * innerHeight;
@@ -629,7 +653,7 @@ function renderBarChart(mountId, categories, values, opts) {
   const barWidth = Math.max(2, innerWidth / categories.length - 2);
 
   const gridLines = yTicks.map((tick) => `<line x1="${margin.left}" x2="${width - margin.right}" y1="${yScale(tick)}" y2="${yScale(tick)}" stroke="${lineColor}" stroke-width="1" />`).join('');
-  const yAxisLabels = yTicks.map((tick) => `<text x="${margin.left - 8}" y="${yScale(tick) + 3}" text-anchor="end" font-size="9" fill="${mutedColor}">${formatAxisNumber(tick)}</text>`).join('');
+  const yAxisLabels = yTicks.map((tick) => `<text x="${margin.left - 8}" y="${yScale(tick) + 3}" text-anchor="end" font-size="9" fill="${mutedColor}">${formatYAxis(tick)}</text>`).join('');
   const xAxisLabels = xTicks.map((tick) => `<text x="${xScale(tick)}" y="${height - margin.bottom + 16}" text-anchor="middle" font-size="9" fill="${mutedColor}">${formatAxisNumber(tick)}</text>`).join('');
 
   let bars = '';
@@ -908,8 +932,11 @@ function renderAnalysisCharts() {
   const nLo = analyzeData.N_lo[timeIndex][yearIndex];
   const nHi = analyzeData.N_hi[timeIndex][yearIndex];
   const abundanceValues = sizeCategories.map((_, i) => ({ value: nMed[i], lo: nLo[i], hi: nHi[i] }));
+  // fixed across time periods (within the selected year) so the axis doesn't
+  // rescale as the time slider moves, making magnitudes comparable
+  const abundanceMaxY = Math.max(0, ...analyzeData.N_hi.map((occRow) => Math.max(...occRow[yearIndex])));
   renderBarChart('chart-abundance', sizeCategories, abundanceValues, {
-    xLabel: 'carapace width (mm)', yLabel: 'estimated abundance', color: '#4a9974',
+    xLabel: 'carapace width (mm)', yLabel: 'estimated abundance', color: '#4a9974', maxY: abundanceMaxY,
   });
 
   const totalMed = analyzeData.tot_med[timeIndex][yearIndex];
@@ -919,9 +946,12 @@ function renderAnalysisCharts() {
 
   const cpueVals = analyzeData.cpue[timeIndex][yearIndex];
   const cpueValues = sizeCategories.map((_, i) => ({ value: cpueVals[i] }));
+  const cpueValuesForYear = analyzeData.cpue.flatMap((occRow) => occRow[yearIndex].filter((v) => Number.isFinite(v)));
+  const cpueMaxY = cpueValuesForYear.length ? Math.max(...cpueValuesForYear) : 0;
   renderBarChart('chart-cpue-size', sizeCategories, cpueValues, {
     xLabel: 'carapace width (mm)', yLabel: 'captured crabs / trap (CPUE)', color: '#c9932b',
     emptyMessage: 'No observations for this year and time period.',
+    maxY: cpueMaxY, yAxisFormatter: (value) => formatSignificant(value, 2),
   });
 }
 

@@ -76,11 +76,7 @@ build_model_inputs <- function(data_dir) {
       h_S_max = 0.003937,
       log_mu_A = 4, sigma_A = 0.2,
       lambda_A = pmax(lambda_floor, 1000),
-      lambda_R = pmax(lambda_floor, 1000),
-      mu_lambda_A = mean(log(pmax(lambda_floor, 1000))),
-      mu_lambda_R = mean(log(pmax(lambda_floor, 1000))),
-      sigma_lambda_A = max(sd(log(pmax(lambda_floor, 1000))), 0.2),
-      sigma_lambda_R = max(sd(log(pmax(lambda_floor, 1000))), 0.2)
+      lambda_R = pmax(lambda_floor, 1000)
     )
   }
 

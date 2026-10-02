@@ -139,7 +139,6 @@ effort2 <- left_join(effort2, catch_total,
 
 # global occasion axis: every biweek sampled in ANY year
 n_occ <- length(biweek)
-occasions <- seq_len(biweek)
 years <- sort(unique(effort2$year))
 n_year <- length(years)
 

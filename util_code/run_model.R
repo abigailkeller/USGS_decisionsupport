@@ -72,9 +72,7 @@ invisible(clusterEvalQ(cl, {
   # build the MCMC
   mcmcConf_myModel <- configureMCMC(
     myModel,
-    monitors = c("mu_lambda_A", "sigma_lambda_A",
-                 "mu_lambda_R", "sigma_lambda_R",
-                 "lambda_R", "lambda_A", "prop_1",
+    monitors = c("lambda_R", "lambda_A", "prop_1",
                  "h_M_max", "h_F_max", "h_S_max"
                  ),
     useConjugacy = FALSE#, enableWAIC = TRUE

@@ -25,19 +25,14 @@ model_code <- nimbleCode({
         recruit_intro1[t] * R_1[y, 1:n_size] +
         recruit_intro2[t] * R_2[y, 1:n_size]
     }
+    
+    ## annual size distribution of recruits
+    R[y, 1:n_size] <- get_init_recruits(mu_R, sigma_R, lower[1:n_size],
+                                        upper[1:n_size],
+                                        lambda_R[y], 
+                                        n_size)
+    
   }
-  
-  ## annual abundance of recruits and adults
-  for (m in 1:n_year) {
-    lambda_R[m] ~ dlnorm(mu_lambda_R, sdlog = sigma_lambda_R)
-    lambda_A[m] ~ dlnorm(mu_lambda_A, sdlog = sigma_lambda_A)
-  }
-  
-  ## annual size distribution of recruits
-  R[1:n_year, 1:n_size] <- get_init_recruits(mu_R, sigma_R, lower[1:n_size],
-                                             upper[1:n_size],
-                                             lambda_R[1:n_year], n_year,
-                                             n_size)
   
   # spread recruits between pulses
   R_1[1:n_year, 1:n_size] <- prop_1 * R[1:n_year, 1:n_size]
@@ -152,14 +147,6 @@ model_code <- nimbleCode({
   # initial recruit size (mean and sd)
   mu_R <- 0.2156
   sigma_R <- 10.74
-  
-  # abundance of adults (lognormal mean and sd)
-  mu_lambda_R ~ dunif(-50, 50)
-  sigma_lambda_R ~ dunif(0, 10000)
-  
-  # abundance of recruits (lognormal mean and sd)
-  mu_lambda_A ~ dunif(-50, 50)
-  sigma_lambda_A ~ dunif(0, 10000)
   
   
 })
@@ -346,13 +333,10 @@ get_init_recruits <- nimbleFunction (
   
   run = function(mu_R = double(0), sigma_R = double(0),
                  lower = double(1), upper = double(1),
-                 lambda_R = double(1), n_year = double(0),
+                 lambda_R = double(0),
                  n_size = double(0))
   {
-    returnType(double(2))
-    
-    # create empty array
-    out <- matrix(NA, ncol = n_size, nrow = n_year)
+    returnType(double(1))
     
     # moment match from normal to gamma
     var <- sigma_R ^ 2
@@ -362,9 +346,7 @@ get_init_recruits <- nimbleFunction (
       pgamma(q = lower, shape = shape, rate = rate)
     
     # get initial size-structured abundance of recruits
-    for (y in 1:n_year) {
-      out[y, ] <- prop_recruit[1:n_size] * lambda_R[y]
-    }
+    out <- prop_recruit * lambda_R
     
     return(out)
   }
