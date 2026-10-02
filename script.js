@@ -113,7 +113,6 @@ function renderPreview(kind, file, rows) {
     });
     previewHeaders = selectedIndexes.map((index) => (index === -1 ? '' : headers[index]));
   }
-  const allColumnsChosen = selectedIndexes.every((index) => index !== -1);
   let filteredRows = rows.slice(1);
   let removedRows = [];
   let removedTrapRows = 0;
@@ -158,10 +157,7 @@ function renderPreview(kind, file, rows) {
   if (removedDateRows > 0) removalReasons.push(`${removedDateRows} rows were removed because their date didn't match the selected format.`);
   const removalMessage = removalReasons.length ? `${removalReasons.map((reason) => `<p class="filter-message">${reason}</p>`).join('')}<label class="removed-rows-toggle"><input type="checkbox" id="show-removed-rows"${card.dataset.showRemoved === 'true' ? ' checked' : ''}> Show removed rows</label>` : '';
   const removedPreview = removedRows.length > 0 && card.dataset.showRemoved === 'true' ? `<p class="removed-rows-heading">Removed rows (${removedRows.length})</p>${renderTable(removedRows)}` : '';
-  const previewSection = allColumnsChosen
-    ? `<p>Preview (all ${filteredRows.length} rows)</p>${renderTable(filteredRows)}`
-    : `<p>Preview</p><p class="chart-empty">Select all columns above to see a preview.</p>`;
-  preview.innerHTML = `${removalMessage}${previewSection}${removedPreview}`;
+  preview.innerHTML = `${removalMessage}<p>Preview (all ${filteredRows.length} rows)</p>${renderTable(filteredRows)}${removedPreview}`;
   const removedToggle = preview.querySelector('#show-removed-rows');
   if (removedToggle) removedToggle.addEventListener('change', (event) => {
     card.dataset.showRemoved = String(event.target.checked);
