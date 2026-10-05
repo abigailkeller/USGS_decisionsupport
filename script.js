@@ -361,11 +361,19 @@ function runQualityChecks() {
   return results;
 }
 
+function resetColumnSelection(kind) {
+  const card = document.querySelector(`[data-kind="${kind}"].drop-zone`)?.closest('.dataset-card');
+  const selection = card?.querySelector('.column-selection');
+  if (!selection) return;
+  selection.querySelectorAll('select').forEach((select) => { select.value = ''; });
+}
+
 function handleFile(kind, file) {
   const error = document.querySelector('#upload-error');
   error.hidden = true;
   resetQualityChecks();
   resetRegimeEstimation();
+  resetColumnSelection(kind);
   if (!file) return;
   if (!file.name.toLowerCase().endsWith('.csv') && file.type !== 'text/csv') return showError(error, 'Please choose a CSV file for each dataset.');
   if (file.size > 10 * 1024 * 1024) return showError(error, 'Each file must be smaller than 10 MB.');
