@@ -11,6 +11,8 @@ const PROGRESS_PATH = path.join(POSTERIOR_DIR, 'progress.json');
 const OUTPUT_PATH = path.join(POSTERIOR_DIR, 'twopulse.rds');
 const ANALYZE_PROGRESS_PATH = path.join(POSTERIOR_DIR, 'analyze_progress.json');
 const ANALYZE_OUTPUT_PATH = path.join(POSTERIOR_DIR, 'simulated_dynamics.json');
+const SUMMARY_CSV_PATH = path.join(POSTERIOR_DIR, 'posterior_summary.csv');
+const README_PATH = path.join(ROOT, 'util_code', 'README.txt');
 const PORT = process.env.PORT || 8000;
 // matches formatDateForExport() in script.js, which always writes dates in this shape
 const EXPORT_DATE_FORMAT = '%m/%d/%Y';
@@ -169,6 +171,119 @@ function handleDownload(req, res) {
   });
 }
 
+// ---- minimal ZIP writer (STORE method, no compression) ----
+// Used to bundle the posterior summary CSV with the README into a single
+// download without adding an npm dependency for it.
+const CRC_TABLE = (() => {
+  const table = [];
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(buffer) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < buffer.length; i += 1) crc = CRC_TABLE[(crc ^ buffer[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function buildZip(files) {
+  const now = new Date();
+  const dosTime = ((now.getHours() & 0x1F) << 11) | ((now.getMinutes() & 0x3F) << 5) | (Math.floor(now.getSeconds() / 2) & 0x1F);
+  const dosDate = (((now.getFullYear() - 1980) & 0x7F) << 9) | (((now.getMonth() + 1) & 0xF) << 5) | (now.getDate() & 0x1F);
+
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+
+  files.forEach(({ name, data }) => {
+    const nameBuf = Buffer.from(name, 'utf8');
+    const crc = crc32(data);
+
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0, 6);
+    localHeader.writeUInt16LE(0, 8);
+    localHeader.writeUInt16LE(dosTime, 10);
+    localHeader.writeUInt16LE(dosDate, 12);
+    localHeader.writeUInt32LE(crc, 14);
+    localHeader.writeUInt32LE(data.length, 18);
+    localHeader.writeUInt32LE(data.length, 22);
+    localHeader.writeUInt16LE(nameBuf.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+    localParts.push(localHeader, nameBuf, data);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0, 8);
+    centralHeader.writeUInt16LE(0, 10);
+    centralHeader.writeUInt16LE(dosTime, 12);
+    centralHeader.writeUInt16LE(dosDate, 14);
+    centralHeader.writeUInt32LE(crc, 16);
+    centralHeader.writeUInt32LE(data.length, 20);
+    centralHeader.writeUInt32LE(data.length, 24);
+    centralHeader.writeUInt16LE(nameBuf.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(offset, 42);
+    centralParts.push(centralHeader, nameBuf);
+
+    offset += localHeader.length + nameBuf.length + data.length;
+  });
+
+  const centralDir = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(files.length, 8);
+  end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(centralDir.length, 12);
+  end.writeUInt32LE(offset, 16);
+  end.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localParts, centralDir, end]);
+}
+
+function handlePosteriorSummaryDownload(req, res) {
+  if (!fs.existsSync(OUTPUT_PATH)) {
+    res.writeHead(400);
+    res.end('No posterior samples found. Run the population model first.');
+    return;
+  }
+  execFile('Rscript', ['util_code/create_posterior_summary.R', OUTPUT_PATH, SUMMARY_CSV_PATH], { cwd: ROOT, maxBuffer: 20 * 1024 * 1024 }, (error, stdout, stderr) => {
+    if (error) {
+      res.writeHead(500);
+      res.end(`Could not create the posterior summary.\n${stderr || stdout || error.message}`);
+      return;
+    }
+    try {
+      const files = [
+        { name: 'posterior_summary.csv', data: fs.readFileSync(SUMMARY_CSV_PATH) },
+        { name: 'README.txt', data: fs.readFileSync(README_PATH) },
+      ];
+      const zipBuffer = buildZip(files);
+      res.writeHead(200, {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': 'attachment; filename="posterior_summary.zip"',
+      });
+      res.end(zipBuffer);
+    } catch (zipError) {
+      res.writeHead(500);
+      res.end(`Could not bundle the posterior summary download.\n${zipError.message}`);
+    }
+  });
+}
+
 function canReuseCompiledModel() {
   if (!modelChild) return false;
   try {
@@ -258,6 +373,7 @@ const server = http.createServer((req, res) => {
   if (req.method === 'POST' && pathname === '/api/run-model') return handleRunModel(req, res);
   if (req.method === 'GET' && pathname === '/api/run-model/progress') return handleProgress(req, res);
   if (req.method === 'GET' && pathname === '/api/run-model/download') return handleDownload(req, res);
+  if (req.method === 'GET' && pathname === '/api/posterior-summary/download') return handlePosteriorSummaryDownload(req, res);
   if (req.method === 'POST' && pathname === '/api/run-model/release') return handleReleaseModel(req, res);
   if (req.method === 'POST' && pathname === '/api/analyze-results') return handleAnalyzeResults(req, res);
   if (req.method === 'GET' && pathname === '/api/analyze-results/progress') return handleAnalyzeProgress(req, res);

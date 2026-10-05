@@ -167,7 +167,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--mint-deep); }
 .chart-year-select { padding: 6px 24px 6px 9px; color: var(--ink); font-size: 11px; }
 .chart-download-button { display: grid; flex: 0 0 auto; width: 28px; height: 28px; place-items: center; color: var(--mint-deep); background: white; border: 1px solid var(--line); border-radius: 50%; font-size: 15px; line-height: 1; cursor: pointer; }
 .chart-download-button:hover { background: #eef7ef; }
-.chart-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 24px; margin-top: 22px; padding-top: 22px; border-top: 1px solid var(--line); }
+.chart-controls:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: 24px; margin-top: 22px; padding-top: 22px; border-top: 1px solid var(--line); }
 .chart-controls label { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; font-weight: 600; }
 .chart-controls select { padding: 7px 24px 7px 9px; color: var(--ink); font-size: 12px; }
 .chart-controls input[type="range"] { width: 200px; accent-color: var(--mint-deep); }

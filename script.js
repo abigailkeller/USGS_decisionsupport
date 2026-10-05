@@ -190,6 +190,40 @@ function resetQualityChecks() {
   updateQualityCheckGating();
 }
 
+function resetRegimeEstimation() {
+  clearInterval(regimeProgressTimer);
+  clearInterval(analyzeProgressTimer);
+  analyzeData = null;
+
+  const regimeRing = document.querySelector('#regime-run-ring');
+  const regimeButton = document.querySelector('#regime-run-button');
+  if (regimeRing) regimeRing.classList.remove('is-done');
+  document.querySelector('#regime-run-title').textContent = 'Ready to run';
+  document.querySelector('#regime-run-copy').textContent = 'Fits the population model to your uploaded catch and effort data using MCMC.';
+  document.querySelector('#regime-run-bar').style.width = '0%';
+  document.querySelector('#regime-run-error').hidden = true;
+  if (regimeButton) regimeButton.disabled = false;
+  document.querySelector('#regime-download-button').hidden = true;
+
+  const analyzeRing = document.querySelector('#analyze-run-ring');
+  const analyzeButton = document.querySelector('#analyze-run-button');
+  document.querySelector('#analyze-card').hidden = true;
+  if (analyzeRing) analyzeRing.classList.remove('is-done');
+  document.querySelector('#analyze-run-title').textContent = 'Ready to analyze';
+  document.querySelector('#analyze-run-copy').textContent = 'Simulates posterior population dynamics from the fitted model.';
+  document.querySelector('#analyze-run-bar').style.width = '0%';
+  document.querySelector('#analyze-run-error').hidden = true;
+  if (analyzeButton) analyzeButton.disabled = false;
+  document.querySelector('#analyze-controls').hidden = true;
+  document.querySelector('#analyze-results-panel').hidden = true;
+
+  document.querySelector('#regime-next-button').disabled = true;
+
+  // release any parked or in-progress model process tied to the data that's
+  // about to be replaced
+  fetch('api/run-model/release', { method: 'POST' }).catch(() => {});
+}
+
 function selectedColumnIndex(kind, key) {
   const select = document.querySelector(`#${kind}-${key}-column`);
   return select && select.value !== '' ? Number(select.value) : -1;
@@ -331,6 +365,7 @@ function handleFile(kind, file) {
   const error = document.querySelector('#upload-error');
   error.hidden = true;
   resetQualityChecks();
+  resetRegimeEstimation();
   if (!file) return;
   if (!file.name.toLowerCase().endsWith('.csv') && file.type !== 'text/csv') return showError(error, 'Please choose a CSV file for each dataset.');
   if (file.size > 10 * 1024 * 1024) return showError(error, 'Each file must be smaller than 10 MB.');
