@@ -34,6 +34,12 @@ model_code <- nimbleCode({
     
   }
   
+  ## annual abundance of recruits and adults
+  for (m in 1:n_year) {
+    lambda_R[m] ~ dunif(0, 100000)
+    lambda_A[m] ~ dunif(0, 100000)
+  }
+  
   # spread recruits between pulses
   R_1[1:n_year, 1:n_size] <- prop_1 * R[1:n_year, 1:n_size]
   R_2[1:n_year, 1:n_size] <- (1 - prop_1) * R[1:n_year, 1:n_size]
