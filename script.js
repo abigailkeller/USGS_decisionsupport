@@ -388,6 +388,17 @@ function handleFile(kind, file) {
   reader.readAsText(file);
 }
 
+const homepageLearnMoreDialog = document.querySelector('#homepage-learn-more-dialog');
+document.querySelector('#homepage-learn-more-button')?.addEventListener('click', () => {
+  homepageLearnMoreDialog.showModal();
+});
+document.querySelector('#homepage-learn-more-close')?.addEventListener('click', () => {
+  homepageLearnMoreDialog.close();
+});
+homepageLearnMoreDialog?.addEventListener('click', (event) => {
+  if (event.target === homepageLearnMoreDialog) homepageLearnMoreDialog.close();
+});
+
 function canEnterStep(step) {
   if (step <= 2) return true;
   if (!uploadedData.catch || !uploadedData.effort || !document.querySelector('#data-confirmed').checked) return false;

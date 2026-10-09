@@ -104,7 +104,14 @@ footer span:first-child { color: var(--ink); font-weight: 700; }
 .primary-button:hover:not(:disabled) { background: #a4dbbf; }
 .primary-button:disabled { cursor: not-allowed; opacity: .45; }
 .secondary-button { color: var(--ink); background: white; border: 1px solid var(--line); }
+.secondary-button:hover { border-color: var(--mint-deep); color: var(--mint-deep); }
 .back-button { padding-left: 0; padding-right: 0; color: var(--muted); background: transparent; }
+#homepage-learn-more-button { display: block; margin: 22px auto 0; }
+.homepage-dialog { position: relative; max-width: min(820px, calc(100% - 48px)); padding: 0; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 24px 60px rgba(24,37,34,.18); }
+.homepage-dialog::backdrop { background: rgba(24,37,34,.55); }
+.homepage-dialog img { display: block; width: 100%; height: auto; }
+.homepage-dialog .dialog-close { position: absolute; top: 10px; right: 10px; width: 32px; height: 32px; color: var(--ink); background: white; border: 1px solid var(--line); border-radius: 50%; font-size: 18px; line-height: 1; cursor: pointer; }
+.homepage-dialog .dialog-close:hover { border-color: var(--mint-deep); color: var(--mint-deep); }
 .dataset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 40px; }
 .dataset-card, .chart-panel, .training-card { min-width: 0; padding: 20px; background: white; border: 1px solid var(--line); }
 .dataset-title { display: grid; grid-template-columns: 31px 1fr 22px; align-items: start; gap: 10px; }
