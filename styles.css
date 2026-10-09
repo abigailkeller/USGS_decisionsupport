@@ -16,11 +16,6 @@ body {
   background: var(--paper);
   font-family: "DM Sans", sans-serif;
 }
-body::before {
-  position: fixed; inset: 0; z-index: -1; content: ""; opacity: .45; pointer-events: none;
-  background-image: linear-gradient(rgba(24,37,34,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(24,37,34,.035) 1px, transparent 1px);
-  background-size: 42px 42px;
-}
 .page-shell { width: min(1120px, calc(100% - 48px)); margin: 0 auto; }
 .topbar { height: 92px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
 .brand { display: flex; align-items: center; gap: 14px; color: var(--ink); font-weight: 700; font-size: 24px; text-decoration: none; letter-spacing: -.02em; }
