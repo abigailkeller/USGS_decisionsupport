@@ -6,9 +6,9 @@ source("util_code/model_code_2pulse.R")
 
 apr <- 3
 july <- 9
-oct <- 11
+oct <- 15
 
-y <- 3
+y <- 2
 
 N_apr <- unlist(result$N_med[[apr]][[y]])
 N_july <- unlist(result$N_med[[july]][[y]])
@@ -43,7 +43,7 @@ get_obs <- function(N, totalo, f_index, s_index, m_index) {
   return(C)
 } 
 
-totalo_apr <- 100
+totalo_apr <- 500
 f_index_apr = c(rep(1, totalo_apr * 0.45), rep(0, totalo_apr * 0.55))
 m_index_apr = c(rep(0, totalo_apr * 0.45), rep(1, totalo_apr * 0.45), rep(0, totalo_apr * 0.1))
 s_index_apr = c(rep(0, totalo_apr * 0.9), rep(1, totalo_apr * 0.1))
@@ -52,7 +52,7 @@ C_apr <- get_obs(N = N_apr, totalo = totalo_apr,
                  m_index = m_index_apr, 
                  s_index = s_index_apr)
 
-totalo_july <- 60
+totalo_july <- 200
 f_index_july = c(rep(1, totalo_july * 0.45), rep(0, totalo_july * 0.55))
 m_index_july = c(rep(0, totalo_july * 0.45), rep(1, totalo_july * 0.45), rep(0, totalo_july * 0.1))
 s_index_july = c(rep(0, totalo_july * 0.9), rep(1, totalo_july * 0.1))
@@ -61,7 +61,7 @@ C_july <- get_obs(N = N_july, totalo = totalo_july,
                   m_index = m_index_july, 
                   s_index = s_index_july)
 
-totalo_oct <- 120
+totalo_oct <- 300
 f_index_oct = c(rep(1, totalo_oct * 0.45), rep(0, totalo_oct * 0.55))
 m_index_oct = c(rep(0, totalo_oct * 0.45), rep(1, totalo_oct * 0.45), rep(0, totalo_oct * 0.1))
 s_index_oct = c(rep(0, totalo_oct * 0.9), rep(1, totalo_oct * 0.1))
@@ -84,15 +84,16 @@ total <- data.frame(
   month = c(rep("April", 66), rep("July", 66), rep("October", 66))
 )
 
-ggplot(data = total) +
+plot_catch <- ggplot(data = total) +
   geom_col(aes(x = size, y = count, fill = type)) +
-  facet_grid(month ~ type) +
+  facet_grid(type ~ month) +
   labs(x = "crab size", y = "count", fill = "trap type") +
   scale_fill_manual(values = c("#4a9974", "#eb806b", "#8452c9")) +
   theme_minimal() +
-  ggtitle("EGC Catch") +
+  ggtitle("Size-structured catch") +
   theme(axis.text = element_blank(),
-        strip.text.x = element_blank())
+        strip.text.y = element_blank(),
+        plot.title = element_text(hjust = 0.5))
 
 effort <- data.frame(
   month = c(rep("April", 3), rep("July", 3), rep("October", 3)),
@@ -103,10 +104,46 @@ effort <- data.frame(
             sum(f_index_oct), sum(m_index_oct), sum(s_index_oct))
 )
 
-ggplot(effort) +
+plot_effort <- ggplot(effort) +
   geom_col(aes(x = month, y = count, fill = type),
            position = "dodge") +
-  labs(x = "Month", y = "Number of traps", fill = "trap type") +
+  labs(x = "month", y = "number\nof traps", fill = "trap type") +
+  scale_fill_manual(values = c("#4a9974", "#eb806b", "#8452c9")) +
+  ggtitle("Effort") +
+  theme_minimal() +
+  theme(axis.text.y = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+
+final_plot <- plot_catch + plot_effort + plot_layout(ncol = 1, 
+                                                     guides = "collect",
+                                                     heights = c(2, 1)) &
+  theme(legend.position = "bottom",
+        legend.key.size = unit(0.3, "cm"))
+
+ggsave("figures/homepage_catch_effort.svg", final_plot,
+       width = 2.98, height = 4.42)
+
+## cpue
+
+total <- total %>% mutate(cpue = NA)
+
+for (i in 1:nrow(total)) {
+  
+  index <- which(effort$month == total[i, "month"] &
+                   effort$type == total[i, "type"])
+  
+  total[i, "cpue"] <- total[i, "count"] / effort[index, "count"]
+  
+}
+
+ggplot(data = total) +
+  geom_col(aes(x = size, y = cpue, fill = type)) +
+  facet_grid(type ~ month, scales = "free_y") +
+  labs(x = "crab size", y = "CPUE", fill = "trap type") +
   scale_fill_manual(values = c("#4a9974", "#eb806b", "#8452c9")) +
   theme_minimal() +
-  theme(axis.text = element_blank())
+  ggtitle("Size-structured CPUE") +
+  theme(axis.text = element_blank(),
+        strip.text.y = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position = "bottom")
