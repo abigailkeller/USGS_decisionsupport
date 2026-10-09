@@ -1,0 +1,13 @@
+.git
+.gitignore
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.ipynb_checkpoints
+.kilo
+.claude
+*.Rproj
+data
+Dockerfile
+.dockerignore
