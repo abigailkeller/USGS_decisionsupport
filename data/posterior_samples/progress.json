@@ -1,1 +1,1 @@
-{"phase":"sampling","completed":4250,"total":5000,"message":"Sampling: 4250 of 5000 iterations","done":false,"error":null,"updatedAt":"2026-10-09T21:18:03.629Z"}
+{"phase":"done","completed":5000,"total":5000,"message":"MCMC run complete.","done":true,"error":null,"updatedAt":"2026-10-09T21:20:27.546Z"}
