@@ -136,7 +136,7 @@ for (i in 1:nrow(total)) {
   
 }
 
-ggplot(data = total) +
+cpue_plot <- ggplot(data = total) +
   geom_col(aes(x = size, y = cpue, fill = type)) +
   facet_grid(type ~ month, scales = "free_y") +
   labs(x = "crab size", y = "CPUE", fill = "trap type") +
@@ -147,3 +147,6 @@ ggplot(data = total) +
         strip.text.y = element_blank(),
         plot.title = element_text(hjust = 0.5)) +
   theme(legend.position = "bottom")
+
+ggsave("figures/homepage_cpue.svg", cpue_plot,
+       width = 2.98, height = 3.2)
