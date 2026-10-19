@@ -388,16 +388,57 @@ function handleFile(kind, file) {
   reader.readAsText(file);
 }
 
+function setupDismissableDialog(dialog, closeButton) {
+  if (!dialog) return;
+  closeButton?.addEventListener('click', () => dialog.close());
+  dialog.addEventListener('click', (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+}
+
 const homepageLearnMoreDialog = document.querySelector('#homepage-learn-more-dialog');
 document.querySelector('#homepage-learn-more-button')?.addEventListener('click', () => {
   homepageLearnMoreDialog.showModal();
 });
-document.querySelector('#homepage-learn-more-close')?.addEventListener('click', () => {
-  homepageLearnMoreDialog.close();
+setupDismissableDialog(homepageLearnMoreDialog, document.querySelector('#homepage-learn-more-close'));
+
+const dynamicsLearnMoreDialog = document.querySelector('#dynamics-learn-more-dialog');
+document.querySelector('#dynamics-learn-more-button')?.addEventListener('click', () => {
+  dynamicsLearnMoreDialog.showModal();
 });
-homepageLearnMoreDialog?.addEventListener('click', (event) => {
-  if (event.target === homepageLearnMoreDialog) homepageLearnMoreDialog.close();
+setupDismissableDialog(dynamicsLearnMoreDialog, document.querySelector('#dynamics-learn-more-close'));
+
+const PROCESS_DETAILS = {
+  removal: {
+    image: 'figures/harvest_rate.png',
+    alt: 'Size-selective removal rate by trap type',
+    text: 'The model estimates size selective removal rates for each trap type. The solid line is the model’s average estimate, and the shaded area represents the 95% credibility interval. Parameter uncertainty in these removal rates is incorporated into the model that fits your data.',
+  },
+  growth: {
+    image: 'figures/growth_plot.png',
+    alt: 'Probabilistic change in body size over two weeks by month',
+    text: 'The model describes EGC growth as a function of body size (carapace width) and time, such that crabs grow in size faster in warmer months and slower in colder months. Each of these figures is showing the probabilistic change in body size over two weeks, with the starting size on the x-axis and the ending size on the y-axis. For example, in July, all crab sizes are most likely to increase in body size over two weeks, but smaller crabs are growing faster than larger crabs.',
+  },
+  naturalMortality: {
+    image: 'figures/natural_survival.png',
+    alt: 'Size-dependent natural survival rate from March to November',
+    text: 'The model accounts for size-dependent natural mortality, with smaller crabs having lower survival rates than larger crabs. This plot shows the rate of survival from March - November if removal did not occur. Parameter uncertainty in these survival rates is not incorporated into the model that fits your data.',
+  },
+};
+
+const processDetailDialog = document.querySelector('#process-detail-dialog');
+document.querySelectorAll('#dynamics-learn-more-dialog [data-process]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const detail = PROCESS_DETAILS[button.dataset.process];
+    if (!detail) return;
+    document.querySelector('#process-detail-text').textContent = detail.text;
+    const image = document.querySelector('#process-detail-image');
+    image.src = detail.image;
+    image.alt = detail.alt;
+    processDetailDialog.showModal();
+  });
 });
+setupDismissableDialog(processDetailDialog, document.querySelector('#process-detail-close'));
 
 function canEnterStep(step) {
   if (step <= 2) return true;
