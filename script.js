@@ -444,7 +444,7 @@ function canEnterStep(step) {
   if (step <= 2) return true;
   if (!uploadedData.catch || !uploadedData.effort || !document.querySelector('#data-confirmed').checked) return false;
   if (step >= 5 && document.querySelector('#regime-next-button').disabled) return false;
-  if (step >= 7 && document.querySelector('#training-next').disabled) return false;
+  if (step >= 7 && document.querySelector('#optimize-next-button').disabled) return false;
   return true;
 }
 
@@ -1129,22 +1129,89 @@ document.querySelector('#analyze-run-button').addEventListener('click', (event) 
   });
 });
 
-document.querySelector('#train-button').addEventListener('click', (event) => {
-  const button = event.currentTarget;
-  const bar = document.querySelector('#training-bar');
-  const title = document.querySelector('#training-title');
-  const copy = document.querySelector('#training-copy');
-  button.disabled = true;
-  title.textContent = 'Training in progress';
-  copy.textContent = 'Learning from your selected objective...';
-  let progress = 0;
-  const timer = setInterval(() => {
-    progress += 20;
-    bar.style.width = `${progress}%`;
-    if (progress === 100) { clearInterval(timer); title.textContent = 'Training complete'; copy.textContent = 'The model is ready to review.'; document.querySelector('#training-ring').classList.add('is-done'); document.querySelector('#training-next').disabled = false; }
-  }, 180);
+// trap cost always has a floor of 1 (the cheapest trap type sets the unit
+// scale that the others' costs are relative to)
+document.querySelectorAll('#objective-cost-fukui, #objective-cost-shrimp, #objective-cost-minnow, #objective-budget').forEach((input) => {
+  input.addEventListener('change', () => {
+    const value = Number(input.value);
+    if (!Number.isFinite(value) || value < 1) input.value = '1';
+  });
 });
-document.querySelectorAll('input[name="objective"]').forEach((input) => input.addEventListener('change', (event) => { document.querySelector('#training-copy').textContent = `Objective: ${event.target.parentElement.querySelector('strong').textContent}`; }));
+
+let optimizeProgressTimer = null;
+
+function pollOptimizeProgress() {
+  const ring = document.querySelector('#optimize-run-ring');
+  const title = document.querySelector('#optimize-run-title');
+  const copy = document.querySelector('#optimize-run-copy');
+  const bar = document.querySelector('#optimize-run-bar');
+  const errorEl = document.querySelector('#optimize-run-error');
+  const button = document.querySelector('#optimize-run-button');
+
+  const PHASE_LABELS = { preparing: 'Preparing data', optimizing: 'Optimizing trap allocation', polishing: 'Refining trap schedule', saving: 'Saving results' };
+
+  clearInterval(optimizeProgressTimer);
+  optimizeProgressTimer = setInterval(() => {
+    fetch('api/optimize-traps/progress').then((response) => response.json()).then((progress) => {
+      const percent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+      bar.style.width = `${percent}%`;
+      title.textContent = PHASE_LABELS[progress.phase] || 'Running';
+      copy.textContent = progress.message || '';
+      if (progress.done) {
+        clearInterval(optimizeProgressTimer);
+        button.disabled = false;
+        if (progress.error) {
+          showError(errorEl, progress.error);
+          title.textContent = 'Optimization failed';
+        } else {
+          ring.classList.add('is-done');
+          title.textContent = 'Optimization complete';
+          copy.textContent = 'Trap schedule saved.';
+          bar.style.width = '100%';
+          document.querySelector('#optimize-download-button').hidden = false;
+          document.querySelector('#optimize-next-button').disabled = false;
+        }
+      }
+    }).catch(() => {});
+  }, 1500);
+}
+
+document.querySelector('#optimize-run-button').addEventListener('click', (event) => {
+  const button = event.currentTarget;
+  const ring = document.querySelector('#optimize-run-ring');
+  const title = document.querySelector('#optimize-run-title');
+  const copy = document.querySelector('#optimize-run-copy');
+  const bar = document.querySelector('#optimize-run-bar');
+  const errorEl = document.querySelector('#optimize-run-error');
+
+  errorEl.hidden = true;
+  document.querySelector('#optimize-download-button').hidden = true;
+  document.querySelector('#optimize-next-button').disabled = true;
+  button.disabled = true;
+  ring.classList.remove('is-done');
+  bar.style.width = '0%';
+  title.textContent = 'Preparing data';
+  copy.textContent = 'Loading model inputs and posterior samples...';
+
+  const budget = Number(document.querySelector('#objective-budget').value);
+  const costFukui = Number(document.querySelector('#objective-cost-fukui').value);
+  const costShrimp = Number(document.querySelector('#objective-cost-shrimp').value);
+  const costMinnow = Number(document.querySelector('#objective-cost-minnow').value);
+
+  fetch('api/optimize-traps', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ budget, costFukui, costShrimp, costMinnow }),
+  }).then(async (response) => {
+    const result = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(result.error || 'Could not start the optimization run.');
+    pollOptimizeProgress();
+  }).catch((error) => {
+    showError(errorEl, error.message);
+    button.disabled = false;
+  });
+});
+
 document.querySelector('[data-restart]').addEventListener('click', () => window.location.reload());
 
 const initialStep = Number(window.location.hash.replace('#step-', ''));

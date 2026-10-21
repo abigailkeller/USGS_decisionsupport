@@ -163,9 +163,7 @@ repeat {
   current_objective <- best$objective
   remaining_budget <- remaining_budget - cost[[best$type]]
   spent <- budget - remaining_budget
-  write_progress("optimizing", spent, budget,
-                sprintf("Allocated %s traps at occasion %d (%.0f of %.0f budget used)",
-                       best$type, best$t, spent, budget))
+  write_progress("optimizing", spent, budget, "Allocating trap units")
   if (remaining_budget <= 0) break
 }
 

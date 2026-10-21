@@ -13,6 +13,9 @@ const ANALYZE_PROGRESS_PATH = path.join(POSTERIOR_DIR, 'analyze_progress.json');
 const ANALYZE_OUTPUT_PATH = path.join(POSTERIOR_DIR, 'simulated_dynamics.json');
 const SUMMARY_CSV_PATH = path.join(POSTERIOR_DIR, 'posterior_summary.csv');
 const README_PATH = path.join(ROOT, 'util_code', 'README.txt');
+const OPTIMIZE_PROGRESS_PATH = path.join(POSTERIOR_DIR, 'optimize_progress.json');
+const OPTIMIZE_OUTPUT_PATH = path.join(POSTERIOR_DIR, 'optimal_trap_schedule.json');
+const OPTIMIZE_N_DRAW = 50;
 const PORT = process.env.PORT || 8000;
 // matches formatDateForExport() in script.js, which always writes dates in this shape
 const EXPORT_DATE_FORMAT = '%m/%d/%Y';
@@ -29,6 +32,7 @@ const MIME_TYPES = {
 
 let modelRunInProgress = false;
 let analysisInProgress = false;
+let optimizeInProgress = false;
 // The run-model child process, if it's still alive and waiting (after
 // finishing its MCMC run) for an "ANALYZE" command on its stdin. Reusing it
 // skips recompiling the model for the analyze-results step. Always null
@@ -367,6 +371,92 @@ function handleReleaseModel(req, res) {
   sendJson(res, 200, { released });
 }
 
+function handleOptimizeTraps(req, res) {
+  if (optimizeInProgress) {
+    return sendJson(res, 409, { error: 'An optimization run is already in progress.' });
+  }
+  if (!fs.existsSync(OUTPUT_PATH)) {
+    return sendJson(res, 400, { error: 'No posterior samples found. Run the population model first.' });
+  }
+  readBody(req).then((raw) => {
+    let payload = {};
+    try {
+      payload = raw ? JSON.parse(raw) : {};
+    } catch (error) {
+      payload = {};
+    }
+    const budget = Number(payload.budget);
+    const costFukui = Number(payload.costFukui);
+    const costShrimp = Number(payload.costShrimp);
+    const costMinnow = Number(payload.costMinnow);
+    if (!Number.isFinite(budget) || budget < 1) {
+      return sendJson(res, 400, { error: 'Trap unit budget must be at least 1.' });
+    }
+    // trap cost is a multiple of the cheapest trap's cost, so 1 is the floor
+    // for every type
+    for (const [label, cost] of [['Fukui', costFukui], ['Shrimp', costShrimp], ['Minnow', costMinnow]]) {
+      if (!Number.isFinite(cost) || cost < 1) {
+        return sendJson(res, 400, { error: `${label} trap cost must be at least 1.` });
+      }
+    }
+
+    if (fs.existsSync(OPTIMIZE_PROGRESS_PATH)) fs.rmSync(OPTIMIZE_PROGRESS_PATH, { force: true });
+    optimizeInProgress = true;
+
+    const child = spawn('Rscript', [
+      'util_code/optimize_traps.R',
+      MODEL_DATA_DIR,
+      OUTPUT_PATH,
+      OPTIMIZE_OUTPUT_PATH,
+      OPTIMIZE_PROGRESS_PATH,
+      String(budget),
+      String(costFukui),
+      String(costShrimp),
+      String(costMinnow),
+      String(OPTIMIZE_N_DRAW),
+    ], { cwd: ROOT, detached: true, stdio: 'ignore' });
+    child.unref();
+    child.on('exit', () => { optimizeInProgress = false; });
+
+    sendJson(res, 200, { started: true });
+  }).catch((error) => {
+    optimizeInProgress = false;
+    sendJson(res, 400, { error: error.message });
+  });
+}
+
+function handleOptimizeProgress(req, res) {
+  fs.readFile(OPTIMIZE_PROGRESS_PATH, 'utf8', (err, content) => {
+    if (err) return sendJson(res, 200, { phase: 'idle', completed: 0, total: 0, done: false, error: null });
+    try {
+      sendJson(res, 200, JSON.parse(content));
+    } catch (error) {
+      sendJson(res, 200, { phase: 'idle', completed: 0, total: 0, done: false, error: null });
+    }
+  });
+}
+
+function handleOptimizeDownload(req, res) {
+  fs.readFile(OPTIMIZE_OUTPUT_PATH, 'utf8', (err, content) => {
+    if (err) { res.writeHead(404); res.end('No optimization results found. Run the optimization first.'); return; }
+    let result;
+    try {
+      result = JSON.parse(content);
+    } catch (error) {
+      res.writeHead(500); res.end('The optimization results file is corrupted.'); return;
+    }
+    const trapTypes = Object.keys(result.schedule);
+    const header = ['Julian day', ...trapTypes.map((type) => type[0].toUpperCase() + type.slice(1))];
+    const rows = result.occasions.map((day, index) => [day, ...trapTypes.map((type) => result.schedule[type][index])]);
+    const lines = [header.map(csvField).join(','), ...rows.map((row) => row.map(csvField).join(','))];
+    res.writeHead(200, {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="optimization_summary.csv"',
+    });
+    res.end(lines.join('\n'));
+  });
+}
+
 const server = http.createServer((req, res) => {
   const { pathname } = new URL(req.url, `http://${req.headers.host}`);
   if (req.method === 'POST' && pathname === '/api/prepare-data') return handlePrepareData(req, res);
@@ -378,6 +468,9 @@ const server = http.createServer((req, res) => {
   if (req.method === 'POST' && pathname === '/api/analyze-results') return handleAnalyzeResults(req, res);
   if (req.method === 'GET' && pathname === '/api/analyze-results/progress') return handleAnalyzeProgress(req, res);
   if (req.method === 'GET' && pathname === '/api/analyze-results/data') return handleAnalyzeData(req, res);
+  if (req.method === 'POST' && pathname === '/api/optimize-traps') return handleOptimizeTraps(req, res);
+  if (req.method === 'GET' && pathname === '/api/optimize-traps/progress') return handleOptimizeProgress(req, res);
+  if (req.method === 'GET' && pathname === '/api/optimize-traps/download') return handleOptimizeDownload(req, res);
   if (req.method === 'GET') return serveStatic(req, res, pathname);
   res.writeHead(405);
   res.end('Method not allowed');
