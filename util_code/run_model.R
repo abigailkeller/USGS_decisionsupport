@@ -31,6 +31,11 @@ data <- model_inputs$data
 inits <- model_inputs$inits
 n_year <- model_inputs$n_year
 lambda_floor <- model_inputs$lambda_floor
+monitors <- c("lambda_R", "lambda_A", "prop_1",
+              "h_M_max", "h_F_max", "h_S_max")
+if (model_inputs$multiyear) {
+  monitors <- c(monitors, "mu_lambda", "sigma_lambda")
+}
 years <- readRDS(file.path(data_dir, "years.rds"))
 
 ########################
@@ -41,11 +46,11 @@ cl <- makeCluster(nchains)
 
 set.seed(10120)
 
-fun_path <- normalizePath("util_code/model_code_2pulse.R")
+fun_path <- normalizePath(model_inputs$model_code_path)
 sim_fun_path <- normalizePath("util_code/sim_functions.R")
 
 clusterExport(cl, c("inits", "data", "constants", "n_year",
-                    "lambda_floor", "fun_path", "sim_fun_path"),
+                    "lambda_floor", "monitors", "fun_path", "sim_fun_path"),
              envir = environment())
 
 write_progress("compiling", 0, iter, "Building and compiling the model...")
@@ -72,9 +77,7 @@ invisible(clusterEvalQ(cl, {
   # build the MCMC
   mcmcConf_myModel <- configureMCMC(
     myModel,
-    monitors = c("lambda_R", "lambda_A", "prop_1",
-                 "h_M_max", "h_F_max", "h_S_max"
-                 ),
+    monitors = monitors,
     useConjugacy = FALSE#, enableWAIC = TRUE
     )
 

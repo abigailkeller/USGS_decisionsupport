@@ -17,6 +17,10 @@ MCMC chains and post-burn-in iterations:
 Rows included:
   lambda_A[y]   estimated adult abundance (lambda) in year y
   lambda_R[y]   estimated recruit abundance (lambda) in year y
+  mu_lambda     Mean annual abundance of recruits across years
+                (only included when multiple years of data were uploaded)
+  sigma_lambda  Standard deviation of annual abundance of recruits across years
+                (only included when multiple years of data were uploaded)
   prop_1        proportion of recruits entering in the first pulse on Julian day 91 (April)
   prop_2        proportion of recruits entering in the second pulse on Julian day 152 (June)
 

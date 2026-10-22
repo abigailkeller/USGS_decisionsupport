@@ -2,7 +2,6 @@ library(nimble)
 
 source("util_code/constants.R")
 source("util_code/build_model_inputs.R")
-source("util_code/model_code_2pulse.R")
 source("util_code/sim_functions.R")
 source("util_code/analyze_helpers.R")
 source("util_code/progress.R")
@@ -23,6 +22,7 @@ analyze <- function() {
 write_progress("preparing", 0, n_draw, "Loading posterior samples and model inputs...")
 
 model_inputs <- build_model_inputs(data_dir)
+source(model_inputs$model_code_path)
 years <- readRDS(file.path(data_dir, "years.rds"))
 
 samp <- readRDS(posterior_path)

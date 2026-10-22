@@ -2,7 +2,6 @@ library(nimble)
 
 source("util_code/constants.R")
 source("util_code/build_model_inputs.R")
-source("util_code/model_code_2pulse.R")
 source("util_code/progress.R")
 
 # Finds an integer trap-deployment schedule (count of each trap type at each
@@ -46,6 +45,7 @@ optimize_traps <- function() {
 write_progress("preparing", 0, budget, "Loading model inputs and posterior samples...")
 
 model_inputs <- build_model_inputs(data_dir)
+source(model_inputs$model_code_path)
 n_occ <- model_inputs$n_occ
 n_year <- model_inputs$n_year
 x <- model_inputs$x
@@ -60,7 +60,7 @@ year_index <- if (is.na(year_index_arg)) n_year else year_index_arg
 
 # An uncompiled nimbleModel is cheap to build (the slow part is
 # compileNimble(), which this skips entirely) and gives us both the fixed
-# growth/mortality/selectivity-shape constants baked into model_code_2pulse.R
+# growth/mortality/selectivity-shape constants baked into the model code file
 # (so they can't drift out of sync with the fitted model) and the
 # nimbleFunctions themselves, callable directly as ordinary R functions.
 scaffold_model <- nimbleModel(code = model_code, data = model_inputs$data,
@@ -90,13 +90,30 @@ set.seed(10120)
 draw_indices <- sample(nrow(samp_mat), n_draw)
 lambdaA_col <- sprintf("lambda_A[%d]", year_index)
 lambdaR_col <- sprintf("lambda_R[%d]", year_index)
+
+# Recruitment in the planning year is unknown, so each posterior draw gets
+# its own random recruit abundance: from the across-year truncated normal
+# (mu_lambda, sigma_lambda) when multiple years were fit, otherwise Poisson
+# around that draw's lambda_R. Drawn once here (not inside objective()) so
+# every candidate schedule is compared against the same recruit abundances.
+draw_recruits <- function(i) {
+  if (model_inputs$multiyear) {
+    mu <- samp_mat[i, "mu_lambda"]
+    sigma <- samp_mat[i, "sigma_lambda"]
+    # inverse-CDF draw from a normal truncated below at 0
+    qnorm(runif(1, pnorm(0, mu, sigma), 1), mu, sigma)
+  } else {
+    rpois(1, samp_mat[i, lambdaR_col])
+  }
+}
+
 draws <- lapply(draw_indices, function(i) list(
   h_F_max = samp_mat[i, "h_F_max"],
   h_S_max = samp_mat[i, "h_S_max"],
   h_M_max = samp_mat[i, "h_M_max"],
   prop_1 = samp_mat[i, "prop_1"],
   lambda_A = samp_mat[i, lambdaA_col],
-  lambda_R = samp_mat[i, lambdaR_col]
+  lambda_R = draw_recruits(i)
 ))
 
 soak_days <- rep(1, n_occ - 1)

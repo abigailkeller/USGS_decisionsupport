@@ -1,7 +1,7 @@
 # Reads the prepped model-data structures from `data_dir` (written by
 # prep_model_data.R) and builds the nimble `constants`/`data`/`inits`
 # arguments shared by both run_model.R (MCMC) and simulate_dynamics.R
-# (posterior-predictive simulation). Keeping this in one place means both
+# (posterior-predictive simulation), and picks which model code file to use. Keeping this in one place means both
 # scripts build the exact same model from the exact same inputs.
 build_model_inputs <- function(data_dir) {
   C <- readRDS(file.path(data_dir, "counts.rds"))
@@ -68,8 +68,18 @@ build_model_inputs <- function(data_dir) {
     sum(needed, na.rm = TRUE) * 3
   })
 
+  # multiple years share a truncated normal hyperprior on recruit abundance
+  # (model_code_multiyear.R); a single year can't inform it, so it uses
+  # independent priors instead (model_code_oneyear.R)
+  multiyear <- n_year > 1
+  model_code_path <- if (multiyear) {
+    "util_code/model_code_multiyear.R"
+  } else {
+    "util_code/model_code_oneyear.R"
+  }
+
   inits <- function() {
-    list(
+    out <- list(
       prop_1 = 0.1,
       h_M_max = 0.0003912,
       h_F_max = 0.0001784,
@@ -78,12 +88,19 @@ build_model_inputs <- function(data_dir) {
       lambda_A = pmax(lambda_floor, 1000),
       lambda_R = pmax(lambda_floor, 1000)
     )
+    if (multiyear) {
+      out$mu_lambda <- mean(out$lambda_R)
+      out$sigma_lambda <- max(sd(out$lambda_R), 1000)
+    }
+    out
   }
 
   list(
     constants = constants,
     data = data,
     inits = inits,
+    multiyear = multiyear,
+    model_code_path = model_code_path,
     n_year = n_year,
     n_occ = n_occ,
     n_pair = n_pair,
