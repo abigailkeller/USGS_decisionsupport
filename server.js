@@ -119,7 +119,7 @@ function handleRunModel(req, res) {
     } catch (error) {
       payload = {};
     }
-    const iter = Number.isFinite(payload.iter) ? Math.max(1, Math.round(payload.iter)) : 5000;
+    const iter = Number.isFinite(payload.iter) ? Math.max(1, Math.round(payload.iter)) : 10000;
     const thin = Number.isFinite(payload.thin) ? Math.max(1, Math.round(payload.thin)) : 10;
     const nchains = 2;
 

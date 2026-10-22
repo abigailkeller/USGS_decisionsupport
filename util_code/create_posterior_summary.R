@@ -16,11 +16,13 @@ samp <- lapply(samp, function(m) cbind(m, prop_2 = 1 - m[, "prop_1"]))
 summary <- MCMCsummary(samp)
 
 # get lambda rows
-lambdaA_rows <- grep("^lambda_A\\[", rownames(summary), value = TRUE)
+lambdaA_rows <- grep("^lambda_A(\\[|$)", rownames(summary), value = TRUE)
 lambdaR_rows <- grep("^lambda_R\\[", rownames(summary), value = TRUE)
 
 # hyperparameters are only monitored when multiple years were fit
-hyper_rows <- intersect(c("mu_lambda", "sigma_lambda"), rownames(summary))
+hyper_rows <- intersect(c("mu_lambda", "sigma_lambda", "alpha_o",
+                          "log_alpha_o", "mu_eps"),
+                        rownames(summary))
 
 # get table to download as csv
 table <- summary[c(lambdaA_rows, lambdaR_rows, hyper_rows, "prop_1", "prop_2"),

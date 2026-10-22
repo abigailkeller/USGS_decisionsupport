@@ -6,6 +6,7 @@ library(expm)
 source("util_code/constants.R")
 source("util_code/build_model_inputs.R")
 source("util_code/analyze_helpers.R")
+source("util_code/sim_functions.R")
 source("util_code/progress.R")
 
 # command-line args: <data_dir> <output_path> <progress_path> <iter> <thin> <nchains>
@@ -14,7 +15,7 @@ args <- commandArgs(trailingOnly = TRUE)
 data_dir <- if (length(args) >= 1) args[1] else "data/model_data"
 output_path <- if (length(args) >= 2) args[2] else "data/posterior_samples/twopulse.rds"
 progress_path <- if (length(args) >= 3) args[3] else "data/posterior_samples/progress.json"
-iter <- if (length(args) >= 4) as.integer(args[4]) else 5000
+iter <- if (length(args) >= 4) as.integer(args[4]) else 10000
 thin <- if (length(args) >= 5) as.integer(args[5]) else 10
 nchains <- if (length(args) >= 6) as.integer(args[6]) else 4
 
@@ -34,7 +35,8 @@ lambda_floor <- model_inputs$lambda_floor
 monitors <- c("lambda_R", "lambda_A", "prop_1",
               "h_M_max", "h_F_max", "h_S_max")
 if (model_inputs$multiyear) {
-  monitors <- c(monitors, "mu_lambda", "sigma_lambda")
+  monitors <- c(monitors, "mu_lambda", "sigma_lambda", "alpha_o",
+                "log_alpha_o", "mu_eps")
 }
 years <- readRDS(file.path(data_dir, "years.rds"))
 
@@ -147,17 +149,18 @@ run_analysis_reusing_worker <- function(posterior_path, analyze_output_path,
 
   samp <- readRDS(posterior_path)
   samp_mat <- do.call(rbind, samp)
-  lambdaA_cols <- grep("^lambda_A\\[", colnames(samp_mat), value = TRUE)
+  lambdaA_cols <- grep("^lambda_A(\\[|$)", colnames(samp_mat), value = TRUE)
   lambdaR_cols <- grep("^lambda_R\\[", colnames(samp_mat), value = TRUE)
   # cap n_draw to the number of posterior samples actually available
   n_draw <- min(n_draw, nrow(samp_mat))
   indices <- sample(nrow(samp_mat), n_draw)
 
-  clusterExport(cl[1], c("samp_mat", "lambdaA_cols", "lambdaR_cols", "indices"),
+  sim_nodes <- sim_param_nodes(model_inputs$multiyear)
+  clusterExport(cl[1], c("samp_mat", "lambdaA_cols", "lambdaR_cols", "indices",
+                         "sim_nodes"),
                envir = environment())
   invisible(clusterEvalQ(cl[1], {
-    deps <- CmyModel$getDependencies(c("h_F_max", "h_S_max", "h_M_max",
-                                       "lambda_A", "lambda_R", "prop_1"))
+    deps <- CmyModel$getDependencies(sim_nodes)
     N_post <- array(NA_real_, dim = c(length(indices), dim(CmyModel$N)))
     NULL
   }))

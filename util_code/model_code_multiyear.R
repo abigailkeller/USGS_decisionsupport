@@ -13,12 +13,13 @@ model_code <- nimbleCode({
                                            S[t, 1:n_size])
   }
   
+  # get adult distribution in first year of data
+  N[1, 1, 1:n_size] <- get_init_adult(log_mu_A, sigma_A,
+                                      lower[1:n_size], upper[1:n_size],
+                                      lambda_A)
+  
   # ---- per-year population dynamics, reusing the shared kernels ----
   for (y in 1:n_year) {
-    N[1, y, 1:n_size] <- get_init_adult(log_mu_A, sigma_A,
-                                        lower[1:n_size], upper[1:n_size],
-                                        lambda_A[y])
-    
     for (t in 1:(n_occ - 1)) {
       N[t + 1, y, 1:n_size] <- K[t, 1:n_size, 1:n_size] %*%
         (N[t, y, 1:n_size] - C_T[t, y, 1:n_size]) +
@@ -34,11 +35,38 @@ model_code <- nimbleCode({
     
   }
   
+  ## inter-annual change
+  # project to new year with seasonal growth
+  K_overwinter[1:n_size, 1:n_size] <- get_kernel(xinf, gk, sigma_G, A, ds,
+                                                 D[n_occ], 1,
+                                                 n_size, pi, x[1:n_size],
+                                                 lower[1:n_size], upper[1:n_size],
+                                                 ones[1:n_size])
+  for (y in 1:(n_year - 1)) {
+    wgrowth_N[y, 1:n_size] <- K_overwinter[1:n_size, 1:n_size] %*% 
+      N[n_occ, y, 1:n_size]
+    
+    # total density after seasonal growth
+    wgrowth_N_sum[y] <- sum(wgrowth_N[y, 1:n_size])
+    
+    ## size- and density-dependent overwinter survival, plus
+    ## density-independent overwinter mortality shared across years
+    S_o[y, 1:n_size] <- overwinter_survival(alpha_o,
+                                            wgrowth_N_sum[y],
+                                            x[1:n_size],
+                                            eps_o)
+    
+    # size- and density-dependent overwinter mortality
+    N_overwinter[y, 1:n_size] <- wgrowth_N[y, 1:n_size] * S_o[y, 1:n_size]
+    # add N_overwinter to N as the start of the next year
+    N[1, y + 1, 1:n_size] <- N_overwinter[y, 1:n_size]
+  }
+  
   ## annual abundance of recruits and adults
   for (m in 1:n_year) {
     lambda_R[m] ~ T(dnorm(mu_lambda, sd = sigma_lambda), 0, )
-    lambda_A[m] ~ dunif(0, 100000)
   }
+  lambda_A ~ dunif(0, 100000)
   
   # spread recruits between pulses
   R_1[1:n_year, 1:n_size] <- prop_1 * R[1:n_year, 1:n_size]
@@ -133,6 +161,15 @@ model_code <- nimbleCode({
   beta <- 0.00178
   # size-dependent natural mortality, shared across all years
   alpha <- 9.498
+  # size-dependent instantaneous prob of overwinter mortality, shared all years
+  # (log-uniform prior: plausible alpha_o scales with 1 / total abundance, so
+  # this spans sites whose abundances differ by orders of magnitude)
+  log_alpha_o ~ dunif(-18, 5)
+  alpha_o <- exp(log_alpha_o)
+  # density-independent instantaneous overwinter mortality, shared all years
+  # (log link keeps the hazard positive)
+  mu_eps ~ dunif(-10, 2)
+  eps_o <- exp(mu_eps)
   
   ##
   # observation process
@@ -379,6 +416,21 @@ survival <- nimbleFunction (
   }
 )
 
+# density- and size-dependent overwinter survival
+overwinter_survival <- nimbleFunction (
+  
+  run = function(alpha_o = double(0), N_sum = double(0),
+                 x = double(1), eps_o = double(0))
+  {
+    returnType(double(1))
+    
+    # get probability of survival
+    out <- exp(-(alpha_o * N_sum / x ^ 2 + eps_o))
+    
+    return(out)
+  }
+)
+
 # assign functions to globalenv
 assign("ddirchmulti", ddirchmulti, envir = .GlobalEnv)
 assign("rdirchmulti", rdirchmulti, envir = .GlobalEnv)
@@ -391,3 +443,4 @@ assign("get_kernel", get_kernel, envir = .GlobalEnv)
 assign("get_init_adult", get_init_adult, envir = .GlobalEnv)
 assign("get_init_recruits", get_init_recruits, envir = .GlobalEnv)
 assign("survival", survival, envir = .GlobalEnv)
+assign("overwinter_survival", overwinter_survival, envir = .GlobalEnv)

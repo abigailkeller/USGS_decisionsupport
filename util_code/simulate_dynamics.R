@@ -28,7 +28,7 @@ years <- readRDS(file.path(data_dir, "years.rds"))
 samp <- readRDS(posterior_path)
 samp_mat <- do.call(rbind, samp)
 
-lambdaA_cols <- grep("^lambda_A\\[", colnames(samp_mat), value = TRUE)
+lambdaA_cols <- grep("^lambda_A(\\[|$)", colnames(samp_mat), value = TRUE)
 lambdaR_cols <- grep("^lambda_R\\[", colnames(samp_mat), value = TRUE)
 
 write_progress("compiling", 0, n_draw, "Building and compiling the model...")
@@ -44,8 +44,7 @@ myModel <- nimbleModel(code = model_code,
                        inits = model_inputs$inits())
 CmyModel <- compileNimble(myModel)
 
-deps <- CmyModel$getDependencies(c("h_F_max", "h_S_max", "h_M_max",
-                                   "lambda_A", "lambda_R", "prop_1"))
+deps <- CmyModel$getDependencies(sim_param_nodes(model_inputs$multiyear))
 
 dimN <- dim(CmyModel$N)
 # cap n_draw to the number of posterior samples actually available (e.g. a

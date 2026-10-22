@@ -78,6 +78,11 @@ build_model_inputs <- function(data_dir) {
     "util_code/model_code_oneyear.R"
   }
 
+  # the multi-year model projects adults from one year into the next
+  # through an overwinter growth kernel with no natural mortality applied
+  # (overwinter mortality is modelled separately), so needs a vector of ones
+  if (multiyear) constants$ones <- rep(1, length(x))
+
   inits <- function() {
     out <- list(
       prop_1 = 0.1,
@@ -91,6 +96,11 @@ build_model_inputs <- function(data_dir) {
     if (multiyear) {
       out$mu_lambda <- mean(out$lambda_R)
       out$sigma_lambda <- max(sd(out$lambda_R), 1000)
+      # adults are only estimated in the first year; later years are
+      # projected through overwinter survival
+      out$lambda_A <- out$lambda_A[1]
+      out$log_alpha_o <- log(0.01)
+      out$mu_eps <- -2
     }
     out
   }

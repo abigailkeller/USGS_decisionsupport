@@ -1,3 +1,12 @@
+# parameter nodes that are set from each posterior draw before simulating;
+# the multi-year model also carries adults between years through overwinter
+# survival
+sim_param_nodes <- function(multiyear) {
+  nodes <- c("h_F_max", "h_S_max", "h_M_max", "lambda_A", "lambda_R", "prop_1")
+  if (multiyear) nodes <- c(nodes, "log_alpha_o", "mu_eps")
+  nodes
+}
+
 simulate_dynamics <- function(model, samp_mat, index,
                               lambdaA_cols, lambdaR_cols, deps) {
   model$h_F_max  <- samp_mat[index, "h_F_max"]
@@ -6,6 +15,11 @@ simulate_dynamics <- function(model, samp_mat, index,
   model$lambda_A <- samp_mat[index, lambdaA_cols]
   model$lambda_R <- samp_mat[index, lambdaR_cols]
   model$prop_1   <- samp_mat[index, "prop_1"]
+  if ("log_alpha_o" %in% colnames(samp_mat)) {
+    # alpha_o is derived from log_alpha_o, so set the log-scale node
+    model$log_alpha_o <- samp_mat[index, "log_alpha_o"]
+    model$mu_eps  <- samp_mat[index, "mu_eps"]
+  }
   
   model$calculate(deps)
   model$N
