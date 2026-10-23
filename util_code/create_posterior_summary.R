@@ -17,7 +17,9 @@ summary <- MCMCsummary(samp)
 
 # get lambda rows
 lambdaA_rows <- grep("^lambda_A(\\[|$)", rownames(summary), value = TRUE)
-lambdaR_rows <- grep("^lambda_R\\[", rownames(summary), value = TRUE)
+lambdaR_rows <- grep("^lambda_R(\\[|$)", rownames(summary), value = TRUE)
+epsy_rows <- grep("^eps_y\\[", rownames(summary), value = TRUE)
+nadult_rows <- grep("^N_adult\\[", rownames(summary), value = TRUE)
 
 # hyperparameters are only monitored when multiple years were fit
 hyper_rows <- intersect(c("mu_lambda", "sigma_lambda", "alpha_o",
@@ -25,7 +27,8 @@ hyper_rows <- intersect(c("mu_lambda", "sigma_lambda", "alpha_o",
                         rownames(summary))
 
 # get table to download as csv
-table <- summary[c(lambdaA_rows, lambdaR_rows, hyper_rows, "prop_1", "prop_2"),
+table <- summary[c(lambdaA_rows, nadult_rows, lambdaR_rows, hyper_rows, epsy_rows,
+                   "prop_1", "prop_2"),
                  c("mean", "sd", "2.5%", "97.5%")]
 
 write.csv(table, output_csv_path)

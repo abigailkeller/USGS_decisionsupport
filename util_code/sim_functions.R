@@ -3,8 +3,15 @@
 # survival
 sim_param_nodes <- function(multiyear) {
   nodes <- c("h_F_max", "h_S_max", "h_M_max", "lambda_A", "lambda_R", "prop_1")
-  if (multiyear) nodes <- c(nodes, "log_alpha_o", "mu_eps")
+  if (multiyear) nodes <- c(nodes, "log_alpha_o", "mu_eps", "eps_y")
   nodes
+}
+
+# the one-year model's abundance and catch arrays have no year dimension
+# (occasion x size); add a length-1 year dimension so both model versions
+# give occasion x year x size arrays for summarizing
+with_year_dim <- function(a) {
+  if (length(dim(a)) == 2) array(a, c(dim(a)[1], 1, dim(a)[2])) else a
 }
 
 simulate_dynamics <- function(model, samp_mat, index,
@@ -19,10 +26,11 @@ simulate_dynamics <- function(model, samp_mat, index,
     # alpha_o is derived from log_alpha_o, so set the log-scale node
     model$log_alpha_o <- samp_mat[index, "log_alpha_o"]
     model$mu_eps  <- samp_mat[index, "mu_eps"]
+    model$eps_y   <- samp_mat[index, grep("^eps_y\\[", colnames(samp_mat))]
   }
   
   model$calculate(deps)
-  model$N
+  with_year_dim(model$N)
 }
 
 create_plot <- function(biweek, year, time, cpue, N_med, N_lo, N_hi,

@@ -119,9 +119,11 @@ function handleRunModel(req, res) {
     } catch (error) {
       payload = {};
     }
-    const iter = Number.isFinite(payload.iter) ? Math.max(1, Math.round(payload.iter)) : 10000;
+    // 'auto' lets run_model.R pick by number of years (20,000 multi-year,
+    // 5,000 single year)
+    const iter = Number.isFinite(payload.iter) ? Math.max(1, Math.round(payload.iter)) : 'auto';
     const thin = Number.isFinite(payload.thin) ? Math.max(1, Math.round(payload.thin)) : 10;
-    const nchains = 2;
+    const nchains = 4;
 
     // a prior run's process may still be parked waiting for an ANALYZE
     // command that never came; starting a new run supersedes it

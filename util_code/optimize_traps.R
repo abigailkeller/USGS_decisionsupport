@@ -15,14 +15,22 @@ source("util_code/progress.R")
 # wherever it reduces predicted final abundance the most per unit cost) and
 # then polishes the result with a local search over single-unit swaps. This
 # reuses the model's own growth/survival/selectivity nimbleFunctions
-# (get_kernel, survival, size_sel_log, size_sel_norm, get_init_adult,
+# (get_kernel, survival, size_sel_log, size_sel_norm,
 # get_init_recruits) uncompiled, which is just as correct as the compiled
 # versions and fast enough here since each forward simulation is a short
 # loop over occasions and size classes.
+#
+# The planning season starts from the crabs that survived the winter after
+# the last fitted year (N_optim, monitored in both model versions), and the
+# objective is the number expected to survive the following winter, i.e. the
+# abundance at the start of the next trapping season. With multiple years of
+# data, overwinter survival is the multi-year model's estimated size-,
+# density- and year-dependent survival; with one year it is ordinary natural
+# survival, which is built into the one-year model's overwinter kernel.
 
 # command-line args:
 # <data_dir> <posterior_path> <output_path> <progress_path> <budget>
-# <cost_fukui> <cost_shrimp> <cost_minnow> <n_draw> <year_index>
+# <cost_fukui> <cost_shrimp> <cost_minnow> <n_draw>
 args <- commandArgs(trailingOnly = TRUE)
 data_dir <- if (length(args) >= 1) args[1] else "data/model_data"
 posterior_path <- if (length(args) >= 2) args[2] else "data/posterior_samples/twopulse.rds"
@@ -35,7 +43,6 @@ cost <- c(
   minnow = if (length(args) >= 8) as.numeric(args[8]) else 1
 )
 n_draw <- if (length(args) >= 9) as.integer(args[9]) else 50
-year_index_arg <- if (length(args) >= 10) as.integer(args[10]) else NA
 
 dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
 write_progress <- make_progress_writer(progress_path)
@@ -56,7 +63,9 @@ D <- constants$D
 n_size <- constants$n_size
 recruit_intro1 <- constants$recruit_intro1
 recruit_intro2 <- constants$recruit_intro2
-year_index <- if (is.na(year_index_arg)) n_year else year_index_arg
+# both model versions only carry survivors forward from the last fitted
+# year (N_optim), so this always plans the season after the last year
+year_index <- n_year
 
 # An uncompiled nimbleModel is cheap to build (the slow part is
 # compileNimble(), which this skips entirely) and gives us both the fixed
@@ -72,8 +81,19 @@ alpha <- scaffold_model$alpha; beta <- scaffold_model$beta
 h_F_k <- scaffold_model$h_F_k; h_F_0 <- scaffold_model$h_F_0
 h_S_k <- scaffold_model$h_S_k; h_S_0 <- scaffold_model$h_S_0
 h_M_A <- scaffold_model$h_M_A; h_M_sigma <- scaffold_model$h_M_sigma
-log_mu_A <- scaffold_model$log_mu_A; sigma_A <- scaffold_model$sigma_A
 mu_R <- scaffold_model$mu_R; sigma_R <- scaffold_model$sigma_R
+multiyear <- model_inputs$multiyear
+
+K_overwinter <- scaffold_model$K_overwinter
+
+# overwinter growth and survival, as in the fitted model's step from the end
+# of one season to the start of the next
+overwinter <- function(N_end, draw) {
+  wgrowth_N <- as.vector(K_overwinter %*% N_end)
+  # the one-year overwinter kernel already applies natural survival
+  if (!multiyear) return(wgrowth_N)
+  wgrowth_N * overwinter_survival(draw$alpha_o, sum(wgrowth_N), x, draw$eps)
+}
 
 # growth/survival kernel per occasion transition -- identical for every
 # candidate trap schedule, so computed once up front
@@ -88,8 +108,15 @@ samp_mat <- do.call(rbind, samp)
 n_draw <- min(n_draw, nrow(samp_mat))
 set.seed(10120)
 draw_indices <- sample(nrow(samp_mat), n_draw)
-lambdaA_col <- sprintf("lambda_A[%d]", year_index)
-lambdaR_col <- sprintf("lambda_R[%d]", year_index)
+# only used with one year of data, where lambda_R is a single node
+lambdaR_col <- "lambda_R"
+
+# crabs expected to survive the winter after the last fitted year, per size
+# class, monitored as N_optim
+N_optim_cols <- sprintf("N_optim[%d]", seq_len(n_size))
+if (!all(N_optim_cols %in% colnames(samp_mat))) {
+  stop("The posterior samples don't include N_optim. Rerun the population model before optimizing.")
+}
 
 # Recruitment in the planning year is unknown, so each posterior draw gets
 # its own random recruit abundance: from the across-year truncated normal
@@ -107,14 +134,24 @@ draw_recruits <- function(i) {
   }
 }
 
-draws <- lapply(draw_indices, function(i) list(
-  h_F_max = samp_mat[i, "h_F_max"],
-  h_S_max = samp_mat[i, "h_S_max"],
-  h_M_max = samp_mat[i, "h_M_max"],
-  prop_1 = samp_mat[i, "prop_1"],
-  lambda_A = samp_mat[i, lambdaA_col],
-  lambda_R = draw_recruits(i)
-))
+draws <- lapply(draw_indices, function(i) {
+  draw <- list(
+    h_F_max = samp_mat[i, "h_F_max"],
+    h_S_max = samp_mat[i, "h_S_max"],
+    h_M_max = samp_mat[i, "h_M_max"],
+    prop_1 = samp_mat[i, "prop_1"],
+    lambda_R = draw_recruits(i),
+    N_start = unname(samp_mat[i, N_optim_cols])
+  )
+  if (multiyear) {
+    draw$alpha_o <- exp(samp_mat[i, "log_alpha_o"])
+    # the winter after the planning season gets its own year-specific
+    # deviation, so schedules are compared across harsh and mild winters
+    draw$eps <- exp(samp_mat[i, "mu_eps"]) +
+      rnorm(1, 0, scaffold_model$sigma_o)
+  }
+  draw
+})
 
 soak_days <- rep(1, n_occ - 1)
 trap_types <- names(cost)
@@ -124,10 +161,11 @@ trap_types <- names(cost)
 # for one posterior draw. Unlike the fitted model's N update (which
 # subtracts the literal *observed* catch C_T), this subtracts a hazard-based
 # *expected* removal, since there's no real catch for a hypothetical future
-# schedule.
+# schedule. Returns the size-structured abundance expected at the start of
+# the following season, which the objective is based on.
 simulate_policy <- function(n, draw) {
   N <- matrix(0, n_occ, n_size)
-  N[1, ] <- get_init_adult(log_mu_A, sigma_A, lower, upper, draw$lambda_A)
+  N[1, ] <- draw$N_start
   R <- get_init_recruits(mu_R, sigma_R, lower, upper, draw$lambda_R, n_size)
   R1 <- draw$prop_1 * R
   R2 <- (1 - draw$prop_1) * R
@@ -143,7 +181,7 @@ simulate_policy <- function(n, draw) {
     N[t + 1, ] <- as.vector(K[[t]] %*% (N[t, ] - removed)) +
       recruit_intro1[t] * R1 + recruit_intro2[t] * R2
   }
-  N[n_occ, ]
+  overwinter(N[n_occ, ], draw)
 }
 
 objective <- function(n) {

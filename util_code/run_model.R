@@ -10,12 +10,14 @@ source("util_code/sim_functions.R")
 source("util_code/progress.R")
 
 # command-line args: <data_dir> <output_path> <progress_path> <iter> <thin> <nchains>
-# falls back to the original standalone defaults when run with no args
+# falls back to the original standalone defaults when run with no args;
+# <iter> may be "auto" (or omitted) to use 20,000 iterations for multiple
+# years of data and 5,000 for a single year
 args <- commandArgs(trailingOnly = TRUE)
 data_dir <- if (length(args) >= 1) args[1] else "data/model_data"
 output_path <- if (length(args) >= 2) args[2] else "data/posterior_samples/twopulse.rds"
 progress_path <- if (length(args) >= 3) args[3] else "data/posterior_samples/progress.json"
-iter <- if (length(args) >= 4) as.integer(args[4]) else 10000
+iter <- if (length(args) >= 4) suppressWarnings(as.integer(args[4])) else NA
 thin <- if (length(args) >= 5) as.integer(args[5]) else 10
 nchains <- if (length(args) >= 6) as.integer(args[6]) else 4
 
@@ -24,19 +26,21 @@ write_progress <- make_progress_writer(progress_path)
 
 run_model <- function() {
 
+model_inputs <- build_model_inputs(data_dir)
+if (is.na(iter)) iter <<- if (model_inputs$multiyear) 20000 else 5000
+
 write_progress("preparing", 0, iter, "Loading prepared model data...")
 
-model_inputs <- build_model_inputs(data_dir)
 constants <- model_inputs$constants
 data <- model_inputs$data
 inits <- model_inputs$inits
 n_year <- model_inputs$n_year
 lambda_floor <- model_inputs$lambda_floor
 monitors <- c("lambda_R", "lambda_A", "prop_1",
-              "h_M_max", "h_F_max", "h_S_max")
+              "h_M_max", "h_F_max", "h_S_max", "N_optim")
 if (model_inputs$multiyear) {
-  monitors <- c(monitors, "mu_lambda", "sigma_lambda", "alpha_o",
-                "log_alpha_o", "mu_eps")
+  monitors <- c(monitors, "mu_lambda", "sigma_lambda", "log_sigma_lambda",
+                "alpha_o", "log_alpha_o", "mu_eps", "eps_y", "N_adult")
 }
 years <- readRDS(file.path(data_dir, "years.rds"))
 
@@ -51,7 +55,8 @@ set.seed(10120)
 fun_path <- normalizePath(model_inputs$model_code_path)
 sim_fun_path <- normalizePath("util_code/sim_functions.R")
 
-clusterExport(cl, c("inits", "data", "constants", "n_year",
+multiyear <- model_inputs$multiyear
+clusterExport(cl, c("inits", "data", "constants", "n_year", "multiyear",
                     "lambda_floor", "monitors", "fun_path", "sim_fun_path"),
              envir = environment())
 
@@ -82,6 +87,19 @@ invisible(clusterEvalQ(cl, {
     monitors = monitors,
     useConjugacy = FALSE#, enableWAIC = TRUE
     )
+
+  # the overwinter mortality parameters trade off against each other
+  # (density-dependent vs. baseline vs. year-specific mortality), so sample
+  # them jointly with an automated factor slice sampler rather than one at
+  # a time. The last winter's eps_y has no data after it (it's only a
+  # forecast), so nimble won't sample it jointly with the others; it keeps
+  # its own sampler
+  if (multiyear) {
+    overwinter_nodes <- c("log_alpha_o", "mu_eps",
+                          sprintf("eps_y[%d]", seq_len(n_year - 1)))
+    mcmcConf_myModel$removeSamplers(overwinter_nodes)
+    mcmcConf_myModel$addSampler(target = overwinter_nodes, type = "AF_slice")
+  }
 
   # build MCMC
   myMCMC <- buildMCMC(mcmcConf_myModel)
@@ -150,7 +168,7 @@ run_analysis_reusing_worker <- function(posterior_path, analyze_output_path,
   samp <- readRDS(posterior_path)
   samp_mat <- do.call(rbind, samp)
   lambdaA_cols <- grep("^lambda_A(\\[|$)", colnames(samp_mat), value = TRUE)
-  lambdaR_cols <- grep("^lambda_R\\[", colnames(samp_mat), value = TRUE)
+  lambdaR_cols <- grep("^lambda_R(\\[|$)", colnames(samp_mat), value = TRUE)
   # cap n_draw to the number of posterior samples actually available
   n_draw <- min(n_draw, nrow(samp_mat))
   indices <- sample(nrow(samp_mat), n_draw)
@@ -161,7 +179,8 @@ run_analysis_reusing_worker <- function(posterior_path, analyze_output_path,
                envir = environment())
   invisible(clusterEvalQ(cl[1], {
     deps <- CmyModel$getDependencies(sim_nodes)
-    N_post <- array(NA_real_, dim = c(length(indices), dim(CmyModel$N)))
+    N_post <- array(NA_real_, dim = c(length(indices),
+                                      dim(with_year_dim(CmyModel$N))))
     NULL
   }))
 
@@ -189,7 +208,7 @@ run_analysis_reusing_worker <- function(posterior_path, analyze_output_path,
   analyze_write_progress("saving", n_draw, n_draw, "Summarizing results...")
 
   N_post_result <- clusterEvalQ(cl[1], N_post)[[1]]
-  C_T_result <- clusterEvalQ(cl[1], CmyModel$C_T)[[1]]
+  C_T_result <- clusterEvalQ(cl[1], with_year_dim(CmyModel$C_T))[[1]]
 
   result <- summarize_dynamics(N_post_result, C_T_result, model_inputs$n_occ,
                                model_inputs$n_year, model_inputs$occ_t,
@@ -229,7 +248,7 @@ stopCluster(cl)
 tryCatch(
   run_model(),
   error = function(e) {
-    write_progress("error", 0, iter, "MCMC run failed.", done = TRUE,
+    write_progress("error", 0, if (is.na(iter)) 1 else iter, "MCMC run failed.", done = TRUE,
                    error = conditionMessage(e))
     quit(status = 1)
   }

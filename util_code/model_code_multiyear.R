@@ -42,7 +42,7 @@ model_code <- nimbleCode({
                                                  n_size, pi, x[1:n_size],
                                                  lower[1:n_size], upper[1:n_size],
                                                  ones[1:n_size])
-  for (y in 1:(n_year - 1)) {
+  for (y in 1:n_year) {
     wgrowth_N[y, 1:n_size] <- K_overwinter[1:n_size, 1:n_size] %*% 
       N[n_occ, y, 1:n_size]
     
@@ -50,17 +50,32 @@ model_code <- nimbleCode({
     wgrowth_N_sum[y] <- sum(wgrowth_N[y, 1:n_size])
     
     ## size- and density-dependent overwinter survival, plus
-    ## density-independent overwinter mortality shared across years
+    ## density-independent overwinter mortality (shared baseline plus a
+    ## year-specific deviation)
     S_o[y, 1:n_size] <- overwinter_survival(alpha_o,
                                             wgrowth_N_sum[y],
                                             x[1:n_size],
-                                            eps_o)
+                                            eps_o + eps_y[y])
+    
+    ## year-specific overwinter mortality random effect
+    eps_y[y] ~ dnorm(0, sd = sigma_o)
     
     # size- and density-dependent overwinter mortality
     N_overwinter[y, 1:n_size] <- wgrowth_N[y, 1:n_size] * S_o[y, 1:n_size]
-    # add N_overwinter to N as the start of the next year
+  }
+
+  # add N_overwinter to the start of the next year, except for the last year
+  for (y in 1:(n_year - 1)) {
     N[1, y + 1, 1:n_size] <- N_overwinter[y, 1:n_size]
   }
+
+  # annual adult abundance at the start of each season
+  for (y in 1:n_year) {
+    N_adult[y] <- sum(N[1, y, 1:n_size])
+  }
+
+  # get starting abundance for optimization
+  N_optim[1:n_size] <- N_overwinter[n_year, 1:n_size]
   
   ## annual abundance of recruits and adults
   for (m in 1:n_year) {
@@ -81,29 +96,38 @@ model_code <- nimbleCode({
   #####################
   
   # ---- observation model: one loop over sampled (t, y) pairs ----
+  # traps of the same type and soak time within an occasion have identical
+  # catch rates, so catch rates and the trap-level likelihood are computed per
+  # group of identical traps (grp_*) rather than per trap; this gives exactly
+  # the same likelihood as the per-trap version. Every occasion has max_grp
+  # groups; unused groups have no traps and contribute nothing
   for (j in 1:n_pair) {
     
-    hazard[j, 1:totalo[j], 1:n_size] <- calc_hazard(
-      totalo[j], n_size, h_F_max, h_F_k, h_F_0, h_S_max, h_S_k, h_S_0,
-      h_M_max, h_M_A, h_M_sigma, f_index[j, 1:totalo[j]],
-      s_index[j, 1:totalo[j]], m_index[j, 1:totalo[j]],
-      soak_days[j, 1:totalo[j]], x[1:n_size])
+    hazard[j, 1:max_grp, 1:n_size] <- calc_hazard(
+      max_grp, n_size, h_F_max, h_F_k, h_F_0, h_S_max, h_S_k, h_S_0,
+      h_M_max, h_M_A, h_M_sigma, grp_f[j, 1:max_grp],
+      grp_s[j, 1:max_grp], grp_m[j, 1:max_grp],
+      grp_soak[j, 1:max_grp], x[1:n_size])
     
-    p[j, 1:n_size] <- calc_prob(totalo[j], n_size,
-                                hazard[j, 1:totalo[j], 1:n_size])
+    p[j, 1:n_size] <- calc_prob_grouped(max_grp, n_size,
+                                        hazard[j, 1:max_grp, 1:n_size],
+                                        grp_n[j, 1:max_grp])
     
-    p_C[j, 1:totalo[j], 1:n_size] <- calc_cond_prob(
-      totalo[j], n_size, hazard[j, 1:totalo[j], 1:n_size])
+    p_C[j, 1:max_grp, 1:n_size] <- calc_cond_prob_grouped(
+      max_grp, n_size, hazard[j, 1:max_grp, 1:n_size],
+      grp_n[j, 1:max_grp])
     
     for (k in 1:n_size) {
       
       C_T[occ_t[j], occ_y[j], k] ~ dbinom(
         size = round(N[occ_t[j], occ_y[j], k]), prob = p[j, k])
       
-      alpha_D[j, 1:totalo[j], k] <- p_C[j, 1:totalo[j], k] * n_p_dir
+      alpha_D[j, 1:max_grp, k] <- p_C[j, 1:max_grp, k] * n_p_dir
       
-      C[j, 1:totalo[j], k] ~ ddirchmulti(alpha = alpha_D[j, 1:totalo[j], k],
-                                         size = C_T[occ_t[j], occ_y[j], k])
+      # C_hist[j, k, g, c]: number of traps in group g that caught c crabs
+      C_hist[j, k, 1:max_grp, 1:max_count] ~ ddirchmulti_grouped(
+        alpha = alpha_D[j, 1:max_grp, k], n_traps = grp_n[j, 1:max_grp],
+        size = C_T[occ_t[j], occ_y[j], k], max_count = max_count)
     }
   }
   
@@ -163,13 +187,17 @@ model_code <- nimbleCode({
   alpha <- 9.498
   # size-dependent instantaneous prob of overwinter mortality, shared all years
   # (log-uniform prior: plausible alpha_o scales with 1 / total abundance, so
-  # this spans sites whose abundances differ by orders of magnitude)
-  log_alpha_o ~ dunif(-18, 5)
+  # this spans sites whose abundances differ by orders of magnitude; the
+  # lower bound is set from the data's abundance in build_model_inputs.R)
+  log_alpha_o ~ dunif(log_alpha_o_min, 5)
   alpha_o <- exp(log_alpha_o)
   # density-independent instantaneous overwinter mortality, shared all years
   # (log link keeps the hazard positive)
   mu_eps ~ dunif(-10, 2)
   eps_o <- exp(mu_eps)
+  # sd of year-specific overwinter mortality random effect, fixed at the
+  # posterior median from an earlier fit to a longer dataset
+  sigma_o <- 0.166
   
   ##
   # observation process
@@ -193,7 +221,10 @@ model_code <- nimbleCode({
 
   # abundance of recruits across years (truncated normal mean and sd)
   mu_lambda ~ dunif(min = 0, max = 100000)
-  sigma_lambda ~ dunif(min = 0, max = 100000)
+  # (log-uniform prior on the sd: with few years, a uniform prior's long
+  # upper tail is slow to explore)
+  log_sigma_lambda ~ dunif(min = 0, max = 11.5)
+  sigma_lambda <- exp(log_sigma_lambda)
 
 })
 
@@ -216,6 +247,62 @@ rdirchmulti <- nimbleFunction (
     if (n != 1) print("rdirchmulti only allows n = 1; using n = 1.")
     p <- rdirch(1, alpha)
     return(rmulti(1, size = size, prob = p))
+  })
+
+# dirichlet multinomial over traps, computed per group of identical traps.
+# x[g, c] is the number of traps in group g that caught c crabs; every trap
+# in group g has the same alpha[g]. Equal to ddirchmulti over the individual
+# traps, since traps with zero catch contribute lgamma(alpha) to both the
+# sum(lgamma(alpha)) and sum(lgamma(alpha + x)) terms, which cancel.
+ddirchmulti_grouped <- nimbleFunction (
+  run = function(x = double(2), alpha = double(1), n_traps = double(1),
+                 size = double(0), max_count = double(0),
+                 log = integer(0, default = 0)) {
+    returnType(double(0))
+    sum_alpha <- sum(n_traps * alpha)
+    logProb <- lgamma(size + 1) + lgamma(sum_alpha) -
+      lgamma(sum_alpha + size)
+    for (g in 1:length(alpha)) {
+      for (cc in 1:max_count) {
+        if (x[g, cc] > 0) {
+          logProb <- logProb + x[g, cc] *
+            (lgamma(alpha[g] + cc) - lgamma(alpha[g]) - lgamma(cc + 1))
+        }
+      }
+    }
+    if (log) return(logProb)
+    else return(exp(logProb))
+  })
+# distribution number generator (trap catches above max_count are recorded
+# as max_count)
+rdirchmulti_grouped <- nimbleFunction (
+  run = function(n = integer(0), alpha = double(1), n_traps = double(1),
+                 size = double(0), max_count = double(0)) {
+    returnType(double(2))
+    if (n != 1) print("rdirchmulti_grouped only allows n = 1; using n = 1.")
+    n_grp <- length(alpha)
+    trap_alpha <- numeric(sum(n_traps))
+    trap_grp <- numeric(sum(n_traps))
+    i <- 1
+    for (g in 1:n_grp) {
+      if (n_traps[g] > 0) {
+        for (r in 1:n_traps[g]) {
+          trap_alpha[i] <- alpha[g]
+          trap_grp[i] <- g
+          i <- i + 1
+        }
+      }
+    }
+    p <- rdirch(1, trap_alpha)
+    y <- rmulti(1, size = size, prob = p)
+    out <- matrix(0, nrow = n_grp, ncol = max_count)
+    for (i in 1:length(y)) {
+      if (y[i] > 0) {
+        cc <- min(y[i], max_count)
+        out[trap_grp[i], cc] <- out[trap_grp[i], cc] + 1
+      }
+    }
+    return(out)
   })
 
 # size selective hazard rate of trap type minnow - bell-shaped curve
@@ -309,6 +396,44 @@ calc_prob <- nimbleFunction (
     # loop through sizes
     for (k in 1:n_size) {
       tot <- sum(hazard[1:nobs, k])
+      # 1 - exp(-P(captured at all))
+      p[k] <- 1 - exp(-tot)
+    }
+    return(p)
+  }
+)
+
+# calculate conditional probability of capture in each trap of a group,
+# given capture at all; n_traps[g] traps share hazard[g, ]
+calc_cond_prob_grouped <- nimbleFunction(
+  run = function(n_grp = double(0), n_size = double(0), hazard = double(2),
+                 n_traps = double(1)) {
+    returnType(double(2))
+    
+    # create empty array
+    array <- array(init = FALSE, dim = c(n_grp, n_size))
+    
+    for (k in 1:n_size) {
+      tot <- sum(n_traps[1:n_grp] * hazard[1:n_grp, k])
+      for (g in 1:n_grp) array[g, k] <- hazard[g, k] / tot
+    }
+    return(array)
+  }
+)
+
+# calculate total capture probability; n_traps[g] traps share hazard[g, ]
+calc_prob_grouped <- nimbleFunction (
+  run = function(n_grp = double(0), n_size = double(0), hazard = double(2),
+                 n_traps = double(1))
+  {
+    returnType(double(1))
+    
+    # create empty array
+    p <- rep(NA, n_size)
+    
+    # loop through sizes
+    for (k in 1:n_size) {
+      tot <- sum(n_traps[1:n_grp] * hazard[1:n_grp, k])
       # 1 - exp(-P(captured at all))
       p[k] <- 1 - exp(-tot)
     }
@@ -420,12 +545,20 @@ survival <- nimbleFunction (
 overwinter_survival <- nimbleFunction (
   
   run = function(alpha_o = double(0), N_sum = double(0),
-                 x = double(1), eps_o = double(0))
+                 x = double(1), eps = double(0))
   {
     returnType(double(1))
     
+    # instantaneous overwinter mortality; eps is the density-independent
+    # part, which a year-specific deviation can make negative, so floor the
+    # total at 0 to keep survival <= 1
+    hazard <- alpha_o * N_sum / x ^ 2 + eps
+    for (k in 1:length(x)) {
+      if (hazard[k] < 0) hazard[k] <- 0
+    }
+    
     # get probability of survival
-    out <- exp(-(alpha_o * N_sum / x ^ 2 + eps_o))
+    out <- exp(-hazard)
     
     return(out)
   }
@@ -434,11 +567,15 @@ overwinter_survival <- nimbleFunction (
 # assign functions to globalenv
 assign("ddirchmulti", ddirchmulti, envir = .GlobalEnv)
 assign("rdirchmulti", rdirchmulti, envir = .GlobalEnv)
+assign("ddirchmulti_grouped", ddirchmulti_grouped, envir = .GlobalEnv)
+assign("rdirchmulti_grouped", rdirchmulti_grouped, envir = .GlobalEnv)
 assign("size_sel_norm", size_sel_norm, envir = .GlobalEnv)
 assign("size_sel_log", size_sel_log, envir = .GlobalEnv)
 assign("calc_hazard", calc_hazard, envir = .GlobalEnv)
 assign("calc_cond_prob", calc_cond_prob, envir = .GlobalEnv)
 assign("calc_prob", calc_prob, envir = .GlobalEnv)
+assign("calc_prob_grouped", calc_prob_grouped, envir = .GlobalEnv)
+assign("calc_cond_prob_grouped", calc_cond_prob_grouped, envir = .GlobalEnv)
 assign("get_kernel", get_kernel, envir = .GlobalEnv)
 assign("get_init_adult", get_init_adult, envir = .GlobalEnv)
 assign("get_init_recruits", get_init_recruits, envir = .GlobalEnv)

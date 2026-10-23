@@ -29,7 +29,7 @@ samp <- readRDS(posterior_path)
 samp_mat <- do.call(rbind, samp)
 
 lambdaA_cols <- grep("^lambda_A(\\[|$)", colnames(samp_mat), value = TRUE)
-lambdaR_cols <- grep("^lambda_R\\[", colnames(samp_mat), value = TRUE)
+lambdaR_cols <- grep("^lambda_R(\\[|$)", colnames(samp_mat), value = TRUE)
 
 write_progress("compiling", 0, n_draw, "Building and compiling the model...")
 
@@ -46,7 +46,7 @@ CmyModel <- compileNimble(myModel)
 
 deps <- CmyModel$getDependencies(sim_param_nodes(model_inputs$multiyear))
 
-dimN <- dim(CmyModel$N)
+dimN <- dim(with_year_dim(CmyModel$N))
 # cap n_draw to the number of posterior samples actually available (e.g. a
 # short test run may keep fewer post-burn-in rows than the requested n_draw)
 n_draw <- min(n_draw, nrow(samp_mat))
@@ -65,7 +65,7 @@ for (i in seq_along(indices)) {
 
 write_progress("saving", n_draw, n_draw, "Summarizing results...")
 
-result <- summarize_dynamics(N_post, CmyModel$C_T, model_inputs$n_occ,
+result <- summarize_dynamics(N_post, with_year_dim(CmyModel$C_T), model_inputs$n_occ,
                              model_inputs$n_year, model_inputs$occ_t,
                              model_inputs$occ_y, model_inputs$totalo,
                              model_inputs$x, years, biweek)
