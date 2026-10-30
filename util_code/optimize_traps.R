@@ -147,8 +147,8 @@ draws <- lapply(draw_indices, function(i) {
     draw$alpha_o <- exp(samp_mat[i, "log_alpha_o"])
     # the winter after the planning season gets its own year-specific
     # deviation, so schedules are compared across harsh and mild winters
-    draw$eps <- exp(samp_mat[i, "mu_eps"]) +
-      rnorm(1, 0, scaffold_model$sigma_o)
+    draw$eps <- exp(samp_mat[i, "mu_eps"] +
+                      rnorm(1, 0, scaffold_model$sigma_o))
   }
   draw
 })

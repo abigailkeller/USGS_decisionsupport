@@ -50,12 +50,12 @@ model_code <- nimbleCode({
     wgrowth_N_sum[y] <- sum(wgrowth_N[y, 1:n_size])
     
     ## size- and density-dependent overwinter survival, plus
-    ## density-independent overwinter mortality (shared baseline plus a
-    ## year-specific deviation)
+    ## density-independent overwinter mortality (shared baseline with a
+    ## year-specific deviation on the log scale, so it stays positive)
     S_o[y, 1:n_size] <- overwinter_survival(alpha_o,
                                             wgrowth_N_sum[y],
                                             x[1:n_size],
-                                            eps_o + eps_y[y])
+                                            exp(mu_eps + eps_y[y]))
     
     ## year-specific overwinter mortality random effect
     eps_y[y] ~ dnorm(0, sd = sigma_o)
@@ -191,13 +191,14 @@ model_code <- nimbleCode({
   # lower bound is set from the data's abundance in build_model_inputs.R)
   log_alpha_o ~ dunif(log_alpha_o_min, 5)
   alpha_o <- exp(log_alpha_o)
-  # density-independent instantaneous overwinter mortality, shared all years
-  # (log link keeps the hazard positive)
+  # log of density-independent instantaneous overwinter mortality in an
+  # average winter, shared all years
   mu_eps ~ dunif(-10, 2)
-  eps_o <- exp(mu_eps)
-  # sd of year-specific overwinter mortality random effect, fixed at the
-  # posterior median from an earlier fit to a longer dataset
-  sigma_o <- 0.166
+  # sd of the year-specific overwinter mortality random effect, on the log
+  # scale (relative year-to-year variation in density-independent
+  # mortality); fixed from an earlier fit to a longer dataset, translated
+  # from its additive scale and rounded up
+  sigma_o <- 0.3
   
   ##
   # observation process
@@ -549,16 +550,9 @@ overwinter_survival <- nimbleFunction (
   {
     returnType(double(1))
     
-    # instantaneous overwinter mortality; eps is the density-independent
-    # part, which a year-specific deviation can make negative, so floor the
-    # total at 0 to keep survival <= 1
-    hazard <- alpha_o * N_sum / x ^ 2 + eps
-    for (k in 1:length(x)) {
-      if (hazard[k] < 0) hazard[k] <- 0
-    }
-    
-    # get probability of survival
-    out <- exp(-hazard)
+    # get probability of survival; eps is the density-independent part of
+    # the instantaneous overwinter mortality
+    out <- exp(-(alpha_o * N_sum / x ^ 2 + eps))
     
     return(out)
   }

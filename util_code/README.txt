@@ -39,10 +39,12 @@ Rows included:
                 is exp(-exp(mu_eps))
                 (only included when multiple years of data were uploaded)
   eps_y[y]      Year-specific deviation in density-independent overwinter
-                mortality for the winter following year y (positive = harsher
-                winter); the winter after the last year has no data following
-                it, so its deviation reflects only the assumed year-to-year
-                variation (sd fixed at 0.166)
+                mortality for the winter following year y, on the log scale
+                (positive = harsher winter; e.g. 0.2 means about 22% more
+                density-independent mortality than an average winter); the
+                winter after the last year has no data following it, so its
+                deviation reflects only the assumed year-to-year variation
+                (sd fixed at 0.3)
                 (only included when multiple years of data were uploaded)
   prop_1        proportion of recruits entering in the first pulse on Julian day 91 (April)
   prop_2        proportion of recruits entering in the second pulse on Julian day 152 (June)
