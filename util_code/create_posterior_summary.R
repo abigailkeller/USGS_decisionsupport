@@ -21,9 +21,11 @@ lambdaR_rows <- grep("^lambda_R(\\[|$)", rownames(summary), value = TRUE)
 epsy_rows <- grep("^eps_y\\[", rownames(summary), value = TRUE)
 nadult_rows <- grep("^N_adult\\[", rownames(summary), value = TRUE)
 
-# hyperparameters are only monitored when multiple years were fit
-hyper_rows <- intersect(c("mu_lambda", "sigma_lambda", "alpha_o",
-                          "log_alpha_o", "mu_eps"),
+# parameters that are only in some model versions (most only when multiple
+# years were fit)
+hyper_rows <- intersect(c("mu_lambda", "sigma_lambda", "mu_eps", "b_o",
+                          "log_mu_A",
+                          "sigma_A"),
                         rownames(summary))
 
 # get table to download as csv

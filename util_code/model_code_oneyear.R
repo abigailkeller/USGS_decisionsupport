@@ -166,8 +166,9 @@ model_code <- nimbleCode({
   ##
   
   # initial adult size (lognormal mean and sd)
-  log_mu_A <- 4.018
-  sigma_A <- 0.378
+  # (estimated; priors from the earlier IPM fit)
+  log_mu_A ~ dunif(3.25, 4.5)
+  sigma_A ~ dunif(0.1, 1)
   
   # initial recruit size (mean and sd)
   mu_R <- 0.2156

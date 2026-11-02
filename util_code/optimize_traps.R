@@ -24,8 +24,8 @@ source("util_code/progress.R")
 # the last fitted year (N_optim, monitored in both model versions), and the
 # objective is the number expected to survive the following winter, i.e. the
 # abundance at the start of the next trapping season. With multiple years of
-# data, overwinter survival is the multi-year model's estimated size-,
-# density- and year-dependent survival; with one year it is ordinary natural
+# data, overwinter survival is the multi-year model's estimated size- and
+# year-dependent survival; with one year it is ordinary natural
 # survival, which is built into the one-year model's overwinter kernel.
 
 # command-line args:
@@ -42,7 +42,7 @@ cost <- c(
   shrimp = if (length(args) >= 7) as.numeric(args[7]) else 4,
   minnow = if (length(args) >= 8) as.numeric(args[8]) else 1
 )
-n_draw <- if (length(args) >= 9) as.integer(args[9]) else 50
+n_draw <- if (length(args) >= 9) as.integer(args[9]) else 100
 
 dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
 write_progress <- make_progress_writer(progress_path)
@@ -85,6 +85,8 @@ mu_R <- scaffold_model$mu_R; sigma_R <- scaffold_model$sigma_R
 multiyear <- model_inputs$multiyear
 
 K_overwinter <- scaffold_model$K_overwinter
+# lowest overwinter survival allowed in the multi-year planning simulation
+min_winter_survival <- 0.05
 
 # overwinter growth and survival, as in the fitted model's step from the end
 # of one season to the start of the next
@@ -92,7 +94,10 @@ overwinter <- function(N_end, draw) {
   wgrowth_N <- as.vector(K_overwinter %*% N_end)
   # the one-year overwinter kernel already applies natural survival
   if (!multiyear) return(wgrowth_N)
-  wgrowth_N * overwinter_survival(draw$alpha_o, sum(wgrowth_N), x, draw$eps)
+  # survival is floored at min_winter_survival so that no simulated winter
+  # wipes out the population
+  wgrowth_N * pmax(overwinter_survival(x, draw$eps, draw$b_o),
+                   min_winter_survival)
 }
 
 # growth/survival kernel per occasion transition -- identical for every
@@ -144,11 +149,11 @@ draws <- lapply(draw_indices, function(i) {
     N_start = unname(samp_mat[i, N_optim_cols])
   )
   if (multiyear) {
-    draw$alpha_o <- exp(samp_mat[i, "log_alpha_o"])
+    draw$b_o <- samp_mat[i, "b_o"]
     # the winter after the planning season gets its own year-specific
     # deviation, so schedules are compared across harsh and mild winters
     draw$eps <- exp(samp_mat[i, "mu_eps"] +
-                      rnorm(1, 0, scaffold_model$sigma_o))
+                      rnorm(1, 0, constants$sigma_o))
   }
   draw
 })

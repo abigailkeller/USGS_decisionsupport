@@ -15,7 +15,7 @@ const SUMMARY_CSV_PATH = path.join(POSTERIOR_DIR, 'posterior_summary.csv');
 const README_PATH = path.join(ROOT, 'util_code', 'README.txt');
 const OPTIMIZE_PROGRESS_PATH = path.join(POSTERIOR_DIR, 'optimize_progress.json');
 const OPTIMIZE_OUTPUT_PATH = path.join(POSTERIOR_DIR, 'optimal_trap_schedule.json');
-const OPTIMIZE_N_DRAW = 50;
+const OPTIMIZE_N_DRAW = 100;
 const PORT = process.env.PORT || 8000;
 // matches formatDateForExport() in script.js, which always writes dates in this shape
 const EXPORT_DATE_FORMAT = '%m/%d/%Y';

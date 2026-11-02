@@ -46,21 +46,18 @@ model_code <- nimbleCode({
     wgrowth_N[y, 1:n_size] <- K_overwinter[1:n_size, 1:n_size] %*% 
       N[n_occ, y, 1:n_size]
     
-    # total density after seasonal growth
-    wgrowth_N_sum[y] <- sum(wgrowth_N[y, 1:n_size])
+    ## size-dependent, density-independent overwinter survival: a shared
+    ## baseline with a year-specific deviation on the log scale, so it
+    ## stays positive
+    S_o[y, 1:n_size] <- overwinter_survival(x[1:n_size],
+                                            exp(mu_eps + eps_y[y]), b_o)
     
-    ## size- and density-dependent overwinter survival, plus
-    ## density-independent overwinter mortality (shared baseline with a
-    ## year-specific deviation on the log scale, so it stays positive)
-    S_o[y, 1:n_size] <- overwinter_survival(alpha_o,
-                                            wgrowth_N_sum[y],
-                                            x[1:n_size],
-                                            exp(mu_eps + eps_y[y]))
+    ## year-specific overwinter mortality random effect (non-centred:
+    ## eps_y = sigma_o * z_y)
+    z_y[y] ~ dnorm(0, sd = 1)
+    eps_y[y] <- sigma_o * z_y[y]
     
-    ## year-specific overwinter mortality random effect
-    eps_y[y] ~ dnorm(0, sd = sigma_o)
-    
-    # size- and density-dependent overwinter mortality
+    # overwinter mortality
     N_overwinter[y, 1:n_size] <- wgrowth_N[y, 1:n_size] * S_o[y, 1:n_size]
   }
 
@@ -185,20 +182,17 @@ model_code <- nimbleCode({
   beta <- 0.00178
   # size-dependent natural mortality, shared across all years
   alpha <- 9.498
-  # size-dependent instantaneous prob of overwinter mortality, shared all years
-  # (log-uniform prior: plausible alpha_o scales with 1 / total abundance, so
-  # this spans sites whose abundances differ by orders of magnitude; the
-  # lower bound is set from the data's abundance in build_model_inputs.R)
-  log_alpha_o ~ dunif(log_alpha_o_min, 5)
-  alpha_o <- exp(log_alpha_o)
-  # log of density-independent instantaneous overwinter mortality in an
+  # log of instantaneous overwinter mortality for a 50 mm crab in an
   # average winter, shared all years
   mu_eps ~ dunif(-10, 2)
   # sd of the year-specific overwinter mortality random effect, on the log
-  # scale (relative year-to-year variation in density-independent
-  # mortality); fixed from an earlier fit to a longer dataset, translated
-  # from its additive scale and rounded up
-  sigma_o <- 0.3
+  # scale, is the constant sigma_o (set in build_model_inputs.R). It's fixed
+  # rather than estimated: with few winters its estimate runs to values that
+  # allow a rare winter to kill almost every crab
+  # size dependence of overwinter mortality, which scales as
+  # (x / 50) ^ -b_o: 0 = same for all sizes, larger = concentrated on small
+  # crabs
+  b_o ~ dunif(0, 4)
   
   ##
   # observation process
@@ -213,8 +207,9 @@ model_code <- nimbleCode({
   ##
   
   # initial adult size (lognormal mean and sd)
-  log_mu_A <- 4.018
-  sigma_A <- 0.378
+  # (estimated; priors from the earlier IPM fit)
+  log_mu_A ~ dunif(3.25, 4.5)
+  sigma_A ~ dunif(0.1, 1)
   
   # initial recruit size (mean and sd)
   mu_R <- 0.2156
@@ -542,17 +537,16 @@ survival <- nimbleFunction (
   }
 )
 
-# density- and size-dependent overwinter survival
+# size-dependent, density-independent overwinter survival
 overwinter_survival <- nimbleFunction (
   
-  run = function(alpha_o = double(0), N_sum = double(0),
-                 x = double(1), eps = double(0))
+  run = function(x = double(1), eps = double(0), b_o = double(0))
   {
     returnType(double(1))
     
-    # get probability of survival; eps is the density-independent part of
-    # the instantaneous overwinter mortality
-    out <- exp(-(alpha_o * N_sum / x ^ 2 + eps))
+    # get probability of survival; eps is the instantaneous overwinter
+    # mortality for a 50 mm crab, which scales with size as (x / 50) ^ -b_o
+    out <- exp(-eps * (x / 50) ^ (-b_o))
     
     return(out)
   }

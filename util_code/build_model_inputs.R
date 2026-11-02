@@ -133,14 +133,11 @@ build_model_inputs <- function(data_dir) {
   # (overwinter mortality is modelled separately), so needs a vector of ones
   if (multiyear) constants$ones <- rep(1, length(x))
 
-  # lower bound for the log-uniform prior on alpha_o (multi-year model).
-  # Below it, density-dependent overwinter mortality is negligible -- a
-  # hazard under 0.01 for a 20 mm crab even at 10x the largest catch-based
-  # abundance -- so the likelihood is flat there; letting the prior extend
-  # far into that region makes chains wander it slowly. Scaled by the data's
-  # abundance so it works across sites of very different sizes.
-  log_alpha_o_min <- log(0.01 * 20 ^ 2 / (10 * max(lambda_floor, 1)))
-  if (multiyear) constants$log_alpha_o_min <- log_alpha_o_min
+  # sd of the year-to-year deviation in overwinter mortality (log scale),
+  # fixed for the multi-year model. Estimating it from few winters can give
+  # values that let a rare winter kill almost every crab; 0.3 keeps rare
+  # harsh winters survivable at sites with a harsh typical winter
+  if (multiyear) constants$sigma_o <- 0.3
 
   inits <- function() {
     out <- list(
@@ -148,7 +145,9 @@ build_model_inputs <- function(data_dir) {
       h_M_max = 0.0003912,
       h_F_max = 0.0001784,
       h_S_max = 0.003937,
-      log_mu_A = 4, sigma_A = 0.2,
+      # first-year adult size distribution, started at the values that
+      # were previously fixed in the models
+      log_mu_A = 4.018, sigma_A = 0.378,
       lambda_A = pmax(lambda_floor, 1000),
       lambda_R = pmax(lambda_floor, 1000)
     )
@@ -158,9 +157,9 @@ build_model_inputs <- function(data_dir) {
       # adults are only estimated in the first year; later years are
       # projected through overwinter survival
       out$lambda_A <- out$lambda_A[1]
-      out$log_alpha_o <- max(log(0.01), log_alpha_o_min + 1)
       out$mu_eps <- -2
-      out$eps_y <- rep(0, n_year)
+      out$z_y <- rep(0, n_year)
+      out$b_o <- 1
     }
     out
   }

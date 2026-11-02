@@ -2,8 +2,11 @@
 # the multi-year model also carries adults between years through overwinter
 # survival
 sim_param_nodes <- function(multiyear) {
-  nodes <- c("h_F_max", "h_S_max", "h_M_max", "lambda_A", "lambda_R", "prop_1")
-  if (multiyear) nodes <- c(nodes, "log_alpha_o", "mu_eps", "eps_y")
+  nodes <- c("h_F_max", "h_S_max", "h_M_max", "lambda_A", "lambda_R", "prop_1",
+             "log_mu_A", "sigma_A")
+  if (multiyear) {
+    nodes <- c(nodes, "mu_eps", "z_y", "b_o")
+  }
   nodes
 }
 
@@ -22,11 +25,13 @@ simulate_dynamics <- function(model, samp_mat, index,
   model$lambda_A <- samp_mat[index, lambdaA_cols]
   model$lambda_R <- samp_mat[index, lambdaR_cols]
   model$prop_1   <- samp_mat[index, "prop_1"]
-  if ("log_alpha_o" %in% colnames(samp_mat)) {
-    # alpha_o is derived from log_alpha_o, so set the log-scale node
-    model$log_alpha_o <- samp_mat[index, "log_alpha_o"]
+  model$log_mu_A <- samp_mat[index, "log_mu_A"]
+  model$sigma_A  <- samp_mat[index, "sigma_A"]
+  if ("mu_eps" %in% colnames(samp_mat)) {
     model$mu_eps  <- samp_mat[index, "mu_eps"]
-    model$eps_y   <- samp_mat[index, grep("^eps_y\\[", colnames(samp_mat))]
+    # eps_y is derived from z_y and sigma_o, so set z_y
+    model$z_y     <- samp_mat[index, grep("^z_y\\[", colnames(samp_mat))]
+    model$b_o     <- samp_mat[index, "b_o"]
   }
   
   model$calculate(deps)
