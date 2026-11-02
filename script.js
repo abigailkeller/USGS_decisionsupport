@@ -1155,7 +1155,7 @@ function pollOptimizeProgress() {
   const errorEl = document.querySelector('#optimize-run-error');
   const button = document.querySelector('#optimize-run-button');
 
-  const PHASE_LABELS = { preparing: 'Preparing data', optimizing: 'Optimizing trap allocation', polishing: 'Refining trap schedule', saving: 'Saving results' };
+  const PHASE_LABELS = { preparing: 'Preparing data', optimizing: 'Optimizing trap allocation', polishing: 'Refining trap schedule', scoring: 'Comparing trap schedules', saving: 'Saving results' };
 
   clearInterval(optimizeProgressTimer);
   optimizeProgressTimer = setInterval(() => {
