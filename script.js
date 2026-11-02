@@ -540,6 +540,13 @@ function biweekBreakFor(date) {
 
 const AGGREGATE_REFERENCE_YEAR = 2001;
 
+// Calendar date for a Julian day (day of year), read as a non-leap year so a
+// given Julian day is always the same date; placed in `year` if given.
+function julianDayToDate(jday, year = AGGREGATE_REFERENCE_YEAR) {
+  const nonLeap = new Date(AGGREGATE_REFERENCE_YEAR, 0, jday);
+  return new Date(year, nonLeap.getMonth(), nonLeap.getDate());
+}
+
 function getAvailableYears() {
   const catchCols = { date: selectedColumnIndex('catch', 'date') };
   const effortCols = { dateChecked: selectedColumnIndex('effort', 'date-checked') };
@@ -611,7 +618,7 @@ function buildVisualizationData() {
     effortSummary = effortSummary.filter((g) => g.year === selectedVisualizationYear);
   }
 
-  const xDateFor = (g) => new Date(isAggregate ? AGGREGATE_REFERENCE_YEAR : g.year, 0, g.jday).getTime();
+  const xDateFor = (g) => julianDayToDate(g.jday, isAggregate ? AGGREGATE_REFERENCE_YEAR : g.year).getTime();
 
   return {
     catchPoints,
@@ -1016,7 +1023,7 @@ function renderAnalysisCharts() {
   if (!analyzeData) return;
   const yearIndex = Number(document.querySelector('#analyze-year-select').value) - 1;
   const timeIndex = Number(document.querySelector('#analyze-time-slider').value) - 1;
-  document.querySelector('#analyze-time-label').textContent = `Julian day ${analyzeData.biweek[timeIndex]}`;
+  document.querySelector('#analyze-time-label').textContent = formatDateShort(julianDayToDate(analyzeData.biweek[timeIndex]));
 
   const sizeCategories = analyzeData.x;
   const nMed = analyzeData.N_med[timeIndex][yearIndex];

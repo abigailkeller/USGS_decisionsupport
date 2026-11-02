@@ -12,7 +12,11 @@ const OUTPUT_PATH = path.join(POSTERIOR_DIR, 'twopulse.rds');
 const ANALYZE_PROGRESS_PATH = path.join(POSTERIOR_DIR, 'analyze_progress.json');
 const ANALYZE_OUTPUT_PATH = path.join(POSTERIOR_DIR, 'simulated_dynamics.json');
 const SUMMARY_CSV_PATH = path.join(POSTERIOR_DIR, 'posterior_summary.csv');
-const README_PATH = path.join(ROOT, 'util_code', 'README.txt');
+// posterior summary READMEs, one per model version
+const README_PATHS = {
+  oneyear: path.join(ROOT, 'util_code', 'README_oneyear.txt'),
+  multiyear: path.join(ROOT, 'util_code', 'README_multiyear.txt'),
+};
 const OPTIMIZE_PROGRESS_PATH = path.join(POSTERIOR_DIR, 'optimize_progress.json');
 const OPTIMIZE_OUTPUT_PATH = path.join(POSTERIOR_DIR, 'optimal_trap_schedule.json');
 const OPTIMIZE_N_DRAW = 100;
@@ -38,6 +42,14 @@ let optimizeInProgress = false;
 // skips recompiling the model for the analyze-results step. Always null
 // unless a run-model process is specifically parked waiting for reuse.
 let modelChild = null;
+
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Calendar date (e.g. "Mar 1") for a Julian day, read as a non-leap year
+function julianDayToDateLabel(jday) {
+  const date = new Date(Date.UTC(2001, 0, jday));
+  return `${MONTH_ABBR[date.getUTCMonth()]} ${date.getUTCDate()}`;
+}
 
 function csvField(value) {
   const stringValue = String(value ?? '');
@@ -275,7 +287,8 @@ function handlePosteriorSummaryDownload(req, res) {
     try {
       const files = [
         { name: 'posterior_summary.csv', data: fs.readFileSync(SUMMARY_CSV_PATH) },
-        { name: 'README.txt', data: fs.readFileSync(README_PATH) },
+        // create_posterior_summary.R prints which model version it summarized
+        { name: 'README.txt', data: fs.readFileSync(README_PATHS[stdout.trim()] || README_PATHS.multiyear) },
       ];
       const zipBuffer = buildZip(files);
       res.writeHead(200, {
@@ -448,8 +461,8 @@ function handleOptimizeDownload(req, res) {
       res.writeHead(500); res.end('The optimization results file is corrupted.'); return;
     }
     const trapTypes = Object.keys(result.schedule);
-    const header = ['Julian day', ...trapTypes.map((type) => type[0].toUpperCase() + type.slice(1))];
-    const rows = result.occasions.map((day, index) => [day, ...trapTypes.map((type) => result.schedule[type][index])]);
+    const header = ['Date', ...trapTypes.map((type) => type[0].toUpperCase() + type.slice(1))];
+    const rows = result.occasions.map((day, index) => [julianDayToDateLabel(day), ...trapTypes.map((type) => result.schedule[type][index])]);
     const lines = [header.map(csvField).join(','), ...rows.map((row) => row.map(csvField).join(','))];
     res.writeHead(200, {
       'Content-Type': 'text/csv; charset=utf-8',

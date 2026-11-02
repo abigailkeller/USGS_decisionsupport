@@ -1,6 +1,8 @@
 library(MCMCvis)
 
 # command-line args: <posterior_path> <output_csv_path>
+# prints "multiyear" or "oneyear" to stdout so the caller can bundle the
+# matching README
 args <- commandArgs(trailingOnly = TRUE)
 posterior_path <- if (length(args) >= 1) args[1] else "data/posterior_samples/twopulse.rds"
 output_csv_path <- if (length(args) >= 2) args[2] else "data/posterior_samples/posterior_summary.csv"
@@ -34,3 +36,6 @@ table <- summary[c(lambdaA_rows, nadult_rows, lambdaR_rows, hyper_rows, epsy_row
                  c("mean", "sd", "2.5%", "97.5%")]
 
 write.csv(table, output_csv_path)
+
+# mu_lambda (recruitment across years) only exists in the multi-year model
+cat(if ("mu_lambda" %in% rownames(summary)) "multiyear" else "oneyear")

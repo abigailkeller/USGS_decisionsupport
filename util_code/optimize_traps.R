@@ -5,14 +5,15 @@ source("util_code/build_model_inputs.R")
 source("util_code/progress.R")
 
 # Finds an integer trap-deployment schedule (count of each trap type at each
-# occasion) that minimizes expected final-season abundance, subject to a
+# occasion) that minimizes expected abundance at the start of the next
+# trapping season (after overwinter mortality), subject to a
 # cost-weighted trap budget (e.g. shrimp traps costing more units than fukui
 # or minnow traps). This is a mixed-integer *nonlinear* program -- the
 # capture term 1 - exp(-hazard) saturates with trap count, and that
 # nonlinearity compounds through the growth-kernel recursion across
 # occasions -- so it isn't solvable with a linear MILP solver. Instead this
 # uses a greedy marginal-value allocation (spend one trap-unit at a time
-# wherever it reduces predicted final abundance the most per unit cost) and
+# wherever it reduces predicted next-season abundance the most per unit cost) and
 # then polishes the result with a local search over single-unit swaps. This
 # reuses the model's own growth/survival/selectivity nimbleFunctions
 # (get_kernel, survival, size_sel_log, size_sel_norm,
@@ -88,18 +89,6 @@ K_overwinter <- scaffold_model$K_overwinter
 # lowest overwinter survival allowed in the multi-year planning simulation
 min_winter_survival <- 0.05
 
-# overwinter growth and survival, as in the fitted model's step from the end
-# of one season to the start of the next
-overwinter <- function(N_end, draw) {
-  wgrowth_N <- as.vector(K_overwinter %*% N_end)
-  # the one-year overwinter kernel already applies natural survival
-  if (!multiyear) return(wgrowth_N)
-  # survival is floored at min_winter_survival so that no simulated winter
-  # wipes out the population
-  wgrowth_N * pmax(overwinter_survival(x, draw$eps, draw$b_o),
-                   min_winter_survival)
-}
-
 # growth/survival kernel per occasion transition -- identical for every
 # candidate trap schedule, so computed once up front
 K <- lapply(1:(n_occ - 1), function(t) {
@@ -146,7 +135,11 @@ draws <- lapply(draw_indices, function(i) {
     h_M_max = samp_mat[i, "h_M_max"],
     prop_1 = samp_mat[i, "prop_1"],
     lambda_R = draw_recruits(i),
-    N_start = unname(samp_mat[i, N_optim_cols])
+    N_start = unname(samp_mat[i, N_optim_cols]),
+    # uniform draws behind each occasion x size class's random catch, fixed
+    # per posterior draw so every candidate schedule faces the same catch
+    # randomness (more traps then always catch at least as many crabs)
+    u_catch = matrix(runif((n_occ - 1) * n_size), n_occ - 1, n_size)
   )
   if (multiyear) {
     draw$b_o <- samp_mat[i, "b_o"]
@@ -161,37 +154,67 @@ draws <- lapply(draw_indices, function(i) {
 soak_days <- rep(1, n_occ - 1)
 trap_types <- names(cost)
 
+# ---- precompute everything that doesn't depend on the trap schedule ----
+# All posterior draws are simulated together as draws x size-class matrices,
+# so each occasion is one matrix product instead of one per draw.
+# Selectivity and the recruit size distribution are linear in h_*_max and
+# lambda_R, so each is a fixed curve scaled per draw.
+sel_F <- outer(vapply(draws, `[[`, numeric(1), "h_F_max"),
+               size_sel_log(pmax = 1, k = h_F_k, midpoint = h_F_0, x = x))
+sel_S <- outer(vapply(draws, `[[`, numeric(1), "h_S_max"),
+               size_sel_log(pmax = 1, k = h_S_k, midpoint = h_S_0, x = x))
+sel_M <- outer(vapply(draws, `[[`, numeric(1), "h_M_max"),
+               size_sel_norm(pmax = 1, xmax = h_M_A, sigma = h_M_sigma, x = x))
+recruit_dist <- get_init_recruits(mu_R, sigma_R, lower, upper, 1, n_size)
+lambda_R_d <- vapply(draws, `[[`, numeric(1), "lambda_R")
+prop_1_d <- vapply(draws, `[[`, numeric(1), "prop_1")
+R1 <- outer(prop_1_d * lambda_R_d, recruit_dist)
+R2 <- outer((1 - prop_1_d) * lambda_R_d, recruit_dist)
+N_start <- t(vapply(draws, `[[`, numeric(n_size), "N_start"))
+# fixed uniforms behind the random catch, as occasion x draw x size class
+u_catch <- aperm(simplify2array(lapply(draws, `[[`, "u_catch")), c(1, 3, 2))
+# transposed kernels, for the draws-as-rows layout
+Kt <- lapply(K, t)
+Kt_overwinter <- t(K_overwinter)
+# overwinter survival per draw and size class; density-independent, so fixed
+# for every schedule. Floored at min_winter_survival so no simulated winter
+# wipes out the population. The one-year overwinter kernel already applies
+# natural survival.
+winter_surv <- if (multiyear) {
+  t(vapply(draws, function(d) pmax(overwinter_survival(x, d$eps, d$b_o),
+                                   min_winter_survival), numeric(n_size)))
+} else {
+  matrix(1, length(draws), n_size)
+}
+
 # Forward-simulates the latent population under a candidate trap schedule
 # `n` (an (n_occ - 1) x 3 integer matrix of trap counts per occasion/type),
-# for one posterior draw. Unlike the fitted model's N update (which
-# subtracts the literal *observed* catch C_T), this subtracts a hazard-based
-# *expected* removal, since there's no real catch for a hypothetical future
-# schedule. Returns the size-structured abundance expected at the start of
-# the following season, which the objective is based on.
-simulate_policy <- function(n, draw) {
-  N <- matrix(0, n_occ, n_size)
-  N[1, ] <- draw$N_start
-  R <- get_init_recruits(mu_R, sigma_R, lower, upper, draw$lambda_R, n_size)
-  R1 <- draw$prop_1 * R
-  R2 <- (1 - draw$prop_1) * R
-
+# for all posterior draws at once. Unlike the fitted model's N update (which
+# subtracts the literal *observed* catch C_T), this subtracts a random
+# binomial catch, matching the fitted model's catch distribution, since
+# there's no real catch for a hypothetical future schedule. Returns each
+# draw's total abundance at the start of the following season, which the
+# objective is based on.
+simulate_policy <- function(n) {
+  N <- N_start
   for (t in 1:(n_occ - 1)) {
-    hazard <- n[t, "fukui"] * size_sel_log(pmax = draw$h_F_max, k = h_F_k,
-                                           midpoint = h_F_0, x = x) * soak_days[t] +
-      n[t, "shrimp"] * size_sel_log(pmax = draw$h_S_max, k = h_S_k,
-                                    midpoint = h_S_0, x = x) * soak_days[t] +
-      n[t, "minnow"] * size_sel_norm(pmax = draw$h_M_max, xmax = h_M_A,
-                                     sigma = h_M_sigma, x = x) * soak_days[t]
-    removed <- N[t, ] * (1 - exp(-hazard))
-    N[t + 1, ] <- as.vector(K[[t]] %*% (N[t, ] - removed)) +
+    hazard <- (n[t, "fukui"] * sel_F + n[t, "shrimp"] * sel_S +
+                 n[t, "minnow"] * sel_M) * soak_days[t]
+    # random catch: binomial with the capture probability, as in the fitted
+    # model, drawn by inverse CDF from each draw's fixed uniforms (and capped
+    # at N, since rounding N up could otherwise remove more than are there)
+    removed <- pmin(qbinom(u_catch[t, , ], round(N), 1 - exp(-hazard)), N)
+    N <- (N - removed) %*% Kt[[t]] +
       recruit_intro1[t] * R1 + recruit_intro2[t] * R2
   }
-  overwinter(N[n_occ, ], draw)
+  rowSums((N %*% Kt_overwinter) * winter_surv)
 }
 
-objective <- function(n) {
-  mean(vapply(draws, function(d) sum(simulate_policy(n, d)), numeric(1)))
-}
+objective <- function(n) mean(simulate_policy(n))
+
+# traps added per greedy step and moved per refinement swap, scaled to the
+# budget (1 for a budget of 30, 5 for 300) to keep large budgets fast
+step <- max(1, round(budget / 60))
 
 n <- matrix(0L, n_occ - 1, length(trap_types), dimnames = list(NULL, trap_types))
 remaining_budget <- budget
@@ -200,20 +223,22 @@ spent <- 0
 
 write_progress("optimizing", 0, budget, "Allocating trap units...")
 
-# greedy marginal-value allocation: repeatedly add the single trap-unit
-# (occasion, type) that reduces expected final abundance the most per unit
-# cost, until the budget is exhausted or no option helps
+# greedy marginal-value allocation: repeatedly add `step` traps at the single
+# (occasion, type) that reduces expected next-season abundance the most per
+# unit cost, until the budget is exhausted or no option helps. Near the end
+# of the budget, fewer traps are added if a full step no longer fits.
 repeat {
   best <- NULL
   for (t in 1:(n_occ - 1)) {
     for (type in trap_types) {
-      if (cost[[type]] > remaining_budget) next
+      k <- min(step, floor(remaining_budget / cost[[type]]))
+      if (k < 1) next
       candidate <- n
-      candidate[t, type] <- candidate[t, type] + 1L
+      candidate[t, type] <- candidate[t, type] + as.integer(k)
       candidate_objective <- objective(candidate)
-      gain_per_cost <- (current_objective - candidate_objective) / cost[[type]]
+      gain_per_cost <- (current_objective - candidate_objective) / (k * cost[[type]])
       if (is.null(best) || gain_per_cost > best$gain_per_cost) {
-        best <- list(t = t, type = type, gain_per_cost = gain_per_cost,
+        best <- list(t = t, type = type, k = k, gain_per_cost = gain_per_cost,
                      candidate = candidate, objective = candidate_objective)
       }
     }
@@ -221,7 +246,7 @@ repeat {
   if (is.null(best) || best$gain_per_cost <= 0) break
   n <- best$candidate
   current_objective <- best$objective
-  remaining_budget <- remaining_budget - cost[[best$type]]
+  remaining_budget <- remaining_budget - best$k * cost[[best$type]]
   spent <- budget - remaining_budget
   write_progress("optimizing", spent, budget, "Allocating trap units")
   if (remaining_budget <= 0) break
@@ -229,34 +254,40 @@ repeat {
 
 write_progress("polishing", spent, budget, "Refining the trap schedule...")
 
-# local search: repeatedly try moving a single trap-unit from one
-# occasion/type slot to another (keeping the budget the same), keeping any
-# swap that improves the objective, until no improving swap is found
+# local search, coarse to fine: repeatedly try moving `swap` traps from one
+# occasion/type slot to another (keeping within the budget), keeping any
+# move that improves the objective, until no improving move is found; first
+# with moves the size of the greedy step, then with single traps
 max_passes <- 50
-for (pass in seq_len(max_passes)) {
-  improved <- FALSE
-  for (t1 in 1:(n_occ - 1)) {
-    for (type1 in trap_types) {
-      if (n[t1, type1] == 0) next
-      for (t2 in 1:(n_occ - 1)) {
-        for (type2 in trap_types) {
-          if (t1 == t2 && type1 == type2) next
-          candidate <- n
-          candidate[t1, type1] <- candidate[t1, type1] - 1L
-          candidate[t2, type2] <- candidate[t2, type2] + 1L
-          candidate_cost <- sum(candidate %*% cost[trap_types])
-          if (candidate_cost > budget) next
-          candidate_objective <- objective(candidate)
-          if (candidate_objective < current_objective) {
-            n <- candidate
-            current_objective <- candidate_objective
-            improved <- TRUE
+for (swap in unique(c(step, 1L))) {
+  for (pass in seq_len(max_passes)) {
+    improved <- FALSE
+    for (t1 in 1:(n_occ - 1)) {
+      for (type1 in trap_types) {
+        if (n[t1, type1] < swap) next
+        for (t2 in 1:(n_occ - 1)) {
+          for (type2 in trap_types) {
+            if (t1 == t2 && type1 == type2) next
+            # an accepted move below can empty this slot, so re-check before
+            # taking more traps from it (otherwise trap counts go negative)
+            if (n[t1, type1] < swap) next
+            candidate <- n
+            candidate[t1, type1] <- candidate[t1, type1] - as.integer(swap)
+            candidate[t2, type2] <- candidate[t2, type2] + as.integer(swap)
+            candidate_cost <- sum(candidate %*% cost[trap_types])
+            if (candidate_cost > budget) next
+            candidate_objective <- objective(candidate)
+            if (candidate_objective < current_objective) {
+              n <- candidate
+              current_objective <- candidate_objective
+              improved <- TRUE
+            }
           }
         }
       }
     }
+    if (!improved) break
   }
-  if (!improved) break
 }
 
 write_progress("saving", budget, budget, "Saving optimal trap schedule...")
