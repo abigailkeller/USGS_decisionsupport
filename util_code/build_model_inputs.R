@@ -118,20 +118,53 @@ build_model_inputs <- function(data_dir) {
     sum(needed, na.rm = TRUE) * 3
   })
 
-  # multiple years share a truncated normal hyperprior on recruit abundance
-  # (model_code_multiyear.R); a single year can't inform it, so it uses
-  # independent priors instead (model_code_oneyear.R)
-  multiyear <- n_year > 1
-  model_code_path <- if (multiyear) {
-    "util_code/model_code_multiyear.R"
+  # Which model to fit:
+  # - one year of data: model_code_oneyear.R
+  # - multiple years including at least two consecutive years:
+  #   model_code_multiyear.R, which links consecutive years through
+  #   overwinter mortality and shares a hyperprior on recruit abundance
+  # - multiple years with no two consecutive (e.g. 2011, 2013, 2015):
+  #   nothing can inform overwinter mortality, so each year is fit as in the
+  #   one-year model (model_code_independentyears.R)
+  years <- readRDS(file.path(data_dir, "years.rds"))
+  consecutive <- diff(years) == 1
+  model_type <- if (n_year == 1) {
+    "oneyear"
+  } else if (any(consecutive)) {
+    "multiyear"
   } else {
-    "util_code/model_code_oneyear.R"
+    "independent"
   }
+  multiyear <- model_type == "multiyear"
+  model_code_path <- switch(model_type,
+    oneyear = "util_code/model_code_oneyear.R",
+    multiyear = "util_code/model_code_multiyear.R",
+    independent = "util_code/model_code_independentyears.R")
 
   # the multi-year model projects adults from one year into the next
   # through an overwinter growth kernel with no natural mortality applied
   # (overwinter mortality is modelled separately), so needs a vector of ones
   if (multiyear) constants$ones <- rep(1, length(x))
+
+  # gaps between years: each run of consecutive years ("block") starts with
+  # estimated adults (start_idx), years that directly follow an observed
+  # year are projected from its overwinter survivors (link_idx), and only
+  # winters followed by an observed year, plus the winter after the last
+  # year, are modelled (winter_year). Indices are positions in `years`.
+  if (multiyear) {
+    start_idx <- c(1L, which(!consecutive) + 1L)
+    link_idx <- which(consecutive) + 1L
+    winter_year <- sort(unique(c(link_idx - 1L, n_year)))
+    # index vectors are padded with an unused 0: nimble treats a length-1
+    # constant as a scalar, which breaks indexing like start_idx[k]; the
+    # n_* counts keep loops to the real entries
+    constants$n_start <- length(start_idx)
+    constants$start_idx <- c(start_idx, 0L)
+    constants$n_link <- length(link_idx)
+    constants$link_idx <- c(link_idx, 0L)
+    constants$n_winter <- length(winter_year)
+    constants$winter_year <- c(winter_year, 0L)
+  }
 
   # sd of the year-to-year deviation in overwinter mortality (log scale),
   # fixed for the multi-year model. Estimating it from few winters can give
@@ -154,12 +187,23 @@ build_model_inputs <- function(data_dir) {
     if (multiyear) {
       out$mu_lambda <- mean(out$lambda_R)
       out$log_sigma_lambda <- log(max(sd(out$lambda_R), 1000))
-      # adults are only estimated in the first year; later years are
-      # projected through overwinter survival
-      out$lambda_A <- out$lambda_A[1]
+      # adults are only estimated in the first year of each block of
+      # consecutive years; later years are projected through overwinter
+      # survival
+      out$lambda_A <- out$lambda_A[start_idx]
+      # each block's starting adults have their own size distribution
+      out$log_mu_A <- rep(out$log_mu_A, length(start_idx))
+      out$sigma_A <- rep(out$sigma_A, length(start_idx))
       out$mu_eps <- -2
       out$z_y <- rep(0, n_year)
       out$b_o <- 1
+    }
+    if (model_type == "independent") {
+      # every year has its own parameters
+      for (nm in c("prop_1", "h_M_max", "h_F_max", "h_S_max", "log_mu_A",
+                   "sigma_A")) {
+        out[[nm]] <- rep(out[[nm]], n_year)
+      }
     }
     out
   }
@@ -169,6 +213,7 @@ build_model_inputs <- function(data_dir) {
     data = data,
     inits = inits,
     multiyear = multiyear,
+    model_type = model_type,
     model_code_path = model_code_path,
     n_year = n_year,
     n_occ = n_occ,

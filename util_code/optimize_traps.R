@@ -104,8 +104,14 @@ samp_mat <- do.call(rbind, samp)
 n_draw <- min(n_draw, nrow(samp_mat))
 set.seed(10120)
 draw_indices <- sample(nrow(samp_mat), n_draw)
-# only used with one year of data, where lambda_R is a single node
-lambdaR_col <- "lambda_R"
+# With independent years (no two consecutive), each year has its own
+# catch rates, recruitment timing and recruitment, so the planning season
+# uses the last year's; otherwise these are single nodes
+last_year_col <- function(nm) {
+  indexed <- sprintf("%s[%d]", nm, n_year)
+  if (indexed %in% colnames(samp_mat)) indexed else nm
+}
+lambdaR_col <- last_year_col("lambda_R")
 
 # crabs expected to survive the winter after the last fitted year, per size
 # class, monitored as N_optim
@@ -117,7 +123,8 @@ if (!all(N_optim_cols %in% colnames(samp_mat))) {
 # Recruitment in the planning year is unknown, so each posterior draw gets
 # its own random recruit abundance: from the across-year truncated normal
 # (mu_lambda, sigma_lambda) when multiple years were fit, otherwise Poisson
-# around that draw's lambda_R. Drawn once here (not inside objective()) so
+# around that draw's lambda_R (the last year's, with independent years).
+# Drawn once here (not inside objective()) so
 # every candidate schedule is compared against the same recruit abundances.
 draw_recruits <- function(i) {
   if (model_inputs$multiyear) {
@@ -135,10 +142,10 @@ draw_recruits <- function(i) {
 # next-winter severity
 make_draw <- function(i) {
   draw <- list(
-    h_F_max = samp_mat[i, "h_F_max"],
-    h_S_max = samp_mat[i, "h_S_max"],
-    h_M_max = samp_mat[i, "h_M_max"],
-    prop_1 = samp_mat[i, "prop_1"],
+    h_F_max = samp_mat[i, last_year_col("h_F_max")],
+    h_S_max = samp_mat[i, last_year_col("h_S_max")],
+    h_M_max = samp_mat[i, last_year_col("h_M_max")],
+    prop_1 = samp_mat[i, last_year_col("prop_1")],
     lambda_R = draw_recruits(i),
     N_start = unname(samp_mat[i, N_optim_cols]),
     # uniform draws behind each occasion x size class's random catch, fixed
@@ -228,6 +235,21 @@ objective <- function(n) mean(simulate_policy(n, sim_search))
 empty_schedule <- matrix(0L, n_occ - 1, length(trap_types),
                          dimnames = list(NULL, trap_types))
 
+# Smallest cost-equivalent exchange between each pair of trap types: remove
+# lcm / cost1 traps of the first type and add lcm / cost2 of the second, where
+# lcm is the least common multiple of the two costs (e.g. 1 shrimp for 4
+# minnow at costs 4 and 1). Costs that aren't whole numbers fall back to a
+# one-for-one swap.
+gcd <- function(a, b) if (b == 0) a else gcd(b, a %% b)
+exchange <- lapply(setNames(trap_types, trap_types), function(type1) {
+  lapply(setNames(trap_types, trap_types), function(type2) {
+    c1 <- cost[[type1]]; c2 <- cost[[type2]]
+    if (c1 != round(c1) || c2 != round(c2)) return(c(remove = 1, add = 1))
+    m <- c1 * c2 / gcd(c1, c2)
+    c(remove = m / c1, add = m / c2)
+  })
+})
+
 # One greedy search plus refinement. `step` is the number of traps added per
 # greedy step and moved per coarse refinement swap; progress is reported as
 # `progress_offset` + budget spent, out of `progress_total`.
@@ -269,27 +291,32 @@ search_schedule <- function(step, progress_offset, progress_total, label) {
   write_progress("polishing", progress_offset + budget, progress_total,
                  paste0("Refining the trap schedule (", label, ")"))
 
-  # local search, coarse to fine: repeatedly try moving `swap` traps from one
-  # occasion/type slot to another (keeping within the budget), keeping any
-  # move that improves the objective, until no improving move is found;
-  # first with moves the size of the greedy step, then with single traps
+  # local search, coarse to fine: repeatedly try exchanging traps between
+  # occasion/type slots at equal cost, keeping any exchange that improves the
+  # objective, until no improving exchange is found; first with exchanges
+  # scaled to the greedy step, then with the smallest exchange. Exchanges
+  # are cost-equivalent (e.g. 1 shrimp trap for 4 minnow traps when shrimp
+  # cost 4 and minnow 1), so budget can move between trap types without
+  # being left unspent; a one-for-one swap between types of different cost
+  # either leaves budget unused or exceeds it, which locks in the trap mix
+  # the greedy step happened to start with.
   max_passes <- 50
   for (swap in unique(c(step, 1L))) {
     for (pass in seq_len(max_passes)) {
       improved <- FALSE
       for (t1 in 1:(n_occ - 1)) {
         for (type1 in trap_types) {
-          if (n[t1, type1] < swap) next
           for (t2 in 1:(n_occ - 1)) {
             for (type2 in trap_types) {
               if (t1 == t2 && type1 == type2) next
-              # an accepted move below can empty this slot, so re-check
-              # before taking more traps from it (otherwise trap counts go
-              # negative)
-              if (n[t1, type1] < swap) next
+              remove <- swap * exchange[[type1]][[type2]]["remove"]
+              add <- swap * exchange[[type1]][[type2]]["add"]
+              # an accepted exchange can empty this slot, so check before
+              # every exchange (otherwise trap counts go negative)
+              if (n[t1, type1] < remove) next
               candidate <- n
-              candidate[t1, type1] <- candidate[t1, type1] - as.integer(swap)
-              candidate[t2, type2] <- candidate[t2, type2] + as.integer(swap)
+              candidate[t1, type1] <- candidate[t1, type1] - as.integer(remove)
+              candidate[t2, type2] <- candidate[t2, type2] + as.integer(add)
               candidate_cost <- sum(candidate %*% cost[trap_types])
               if (candidate_cost > budget) next
               candidate_objective <- objective(candidate)

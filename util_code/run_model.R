@@ -40,8 +40,13 @@ monitors <- c("lambda_R", "lambda_A", "prop_1",
               "h_M_max", "h_F_max", "h_S_max", "N_optim", "log_mu_A",
               "sigma_A")
 if (model_inputs$multiyear) {
+  # eps_y and z_y only exist for modelled winters (see winter_year in
+  # build_model_inputs.R), so monitor those elements by name
+  winter_year <- head(model_inputs$constants$winter_year,
+                      model_inputs$constants$n_winter)
   monitors <- c(monitors, "mu_lambda", "sigma_lambda", "log_sigma_lambda",
-                "mu_eps", "eps_y", "z_y", "b_o", "N_adult")
+                "mu_eps", sprintf("eps_y[%d]", winter_year),
+                sprintf("z_y[%d]", winter_year), "b_o", "N_adult")
 }
 years <- readRDS(file.path(data_dir, "years.rds"))
 
@@ -90,14 +95,15 @@ invisible(clusterEvalQ(cl, {
     )
 
   # the overwinter mortality parameters trade off against each other
-  # (density-dependent vs. baseline vs. year-specific mortality and its
-  # sd), so sample them jointly with an automated factor slice sampler
-  # rather than one at a time. The last winter's z_y has no data after it
-  # (it's only a forecast), so nimble won't sample it jointly with the
-  # others; it keeps its own sampler
+  # (baseline vs. size dependence vs. year-specific mortality), so sample
+  # them jointly with an automated factor slice sampler rather than one at
+  # a time. Only winters followed by an observed year are informed by data;
+  # the last winter's z_y is only a forecast, so nimble won't sample it
+  # jointly with the others and it keeps its own sampler
   if (multiyear) {
     overwinter_nodes <- c("mu_eps", "b_o",
-                          sprintf("z_y[%d]", seq_len(n_year - 1)))
+                          sprintf("z_y[%d]", head(constants$link_idx,
+                                                  constants$n_link) - 1))
     mcmcConf_myModel$removeSamplers(overwinter_nodes)
     mcmcConf_myModel$addSampler(target = overwinter_nodes, type = "AF_slice")
   }
@@ -145,6 +151,16 @@ n_keep <- nrow(out[[1]])
 burnin <- floor(n_keep * 0.4)
 out_sub <- lapply(out, function(chain) chain[(burnin + 1):n_keep, ,
                                              drop = FALSE])
+
+# nimble records whole variables, so eps_y and z_y also hold placeholder
+# zeros for winters that aren't modelled (before a gap in the years); drop
+# those columns so they don't appear as estimates
+if (multiyear) {
+  winter_cols <- grep("^(eps_y|z_y)\\[", colnames(out_sub[[1]]), value = TRUE)
+  unmodelled <- winter_cols[!as.integer(gsub("\\D", "", winter_cols)) %in% winter_year]
+  out_sub <- lapply(out_sub, function(chain) chain[, !colnames(chain) %in% unmodelled,
+                                                   drop = FALSE])
+}
 
 # save samples
 saveRDS(out_sub, output_path)

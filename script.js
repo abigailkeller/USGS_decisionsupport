@@ -222,6 +222,27 @@ function resetRegimeEstimation() {
   // release any parked or in-progress model process tied to the data that's
   // about to be replaced
   fetch('api/run-model/release', { method: 'POST' }).catch(() => {});
+
+  // the optimization depends on the model run, so it's reset too
+  resetOptimization();
+}
+
+// Resets the optimization step (used when the data or the objective
+// changes), stopping any run in progress and discarding its results
+function resetOptimization() {
+  clearInterval(optimizeProgressTimer);
+  const ring = document.querySelector('#optimize-run-ring');
+  const button = document.querySelector('#optimize-run-button');
+  if (ring) ring.classList.remove('is-done');
+  document.querySelector('#optimize-run-title').textContent = 'Ready to optimize';
+  document.querySelector('#optimize-run-copy').textContent = 'Finds the trap schedule that minimizes the estimated abundance at the start of the next trapping season within your budget.';
+  document.querySelector('#optimize-run-bar').style.width = '0%';
+  document.querySelector('#optimize-run-error').hidden = true;
+  if (button) button.disabled = false;
+  document.querySelector('#optimize-download-button').hidden = true;
+  document.querySelector('#optimize-next-button').disabled = true;
+
+  fetch('api/optimize-traps/release', { method: 'POST' }).catch(() => {});
 }
 
 function selectedColumnIndex(kind, key) {
@@ -1142,6 +1163,8 @@ document.querySelectorAll('#objective-cost-fukui, #objective-cost-shrimp, #objec
   input.addEventListener('change', () => {
     const value = Number(input.value);
     if (!Number.isFinite(value) || value < 1) input.value = '1';
+    // a changed objective makes any previous optimization out of date
+    resetOptimization();
   });
 });
 

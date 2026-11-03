@@ -19,18 +19,23 @@ with_year_dim <- function(a) {
 
 simulate_dynamics <- function(model, samp_mat, index,
                               lambdaA_cols, lambdaR_cols, deps) {
-  model$h_F_max  <- samp_mat[index, "h_F_max"]
-  model$h_S_max  <- samp_mat[index, "h_S_max"]
-  model$h_M_max  <- samp_mat[index, "h_M_max"]
   model$lambda_A <- samp_mat[index, lambdaA_cols]
   model$lambda_R <- samp_mat[index, lambdaR_cols]
-  model$prop_1   <- samp_mat[index, "prop_1"]
-  model$log_mu_A <- samp_mat[index, "log_mu_A"]
-  model$sigma_A  <- samp_mat[index, "sigma_A"]
+  # these are single values in some model versions and indexed by year or
+  # by block of consecutive years in others, so match either form
+  for (nm in c("h_F_max", "h_S_max", "h_M_max", "prop_1", "log_mu_A",
+               "sigma_A")) {
+    cols <- grep(paste0("^", nm, "(\\[|$)"), colnames(samp_mat), value = TRUE)
+    model[[nm]] <- unname(samp_mat[index, cols])
+  }
   if ("mu_eps" %in% colnames(samp_mat)) {
     model$mu_eps  <- samp_mat[index, "mu_eps"]
-    # eps_y is derived from z_y and sigma_o, so set z_y
-    model$z_y     <- samp_mat[index, grep("^z_y\\[", colnames(samp_mat))]
+    # eps_y is derived from z_y and sigma_o, so set z_y; it only exists for
+    # modelled winters, so set those elements by their year index
+    z_cols <- grep("^z_y\\[", colnames(samp_mat), value = TRUE)
+    z_y <- model$z_y
+    z_y[as.integer(gsub("\\D", "", z_cols))] <- samp_mat[index, z_cols]
+    model$z_y     <- z_y
     model$b_o     <- samp_mat[index, "b_o"]
   }
   

@@ -13,10 +13,21 @@ model_code <- nimbleCode({
                                            S[t, 1:n_size])
   }
   
-  # get adult distribution in first year of data
-  N[1, 1, 1:n_size] <- get_init_adult(log_mu_A, sigma_A,
-                                      lower[1:n_size], upper[1:n_size],
-                                      lambda_A)
+  # adult distribution at the start of the first year of each run of
+  # consecutive years ("block"); with gaps in the data, the year after a
+  # gap can't be projected from the previous observed year, so its adults
+  # are estimated afresh
+  for (k in 1:n_start) {
+    N[1, start_idx[k], 1:n_size] <- get_init_adult(log_mu_A[k], sigma_A[k],
+                                                   lower[1:n_size],
+                                                   upper[1:n_size],
+                                                   lambda_A[k])
+    lambda_A[k] ~ dunif(0, 100000)
+    # each block's starting adults have their own size distribution
+    # (lognormal mean and sd; priors from the earlier IPM fit)
+    log_mu_A[k] ~ dunif(3.25, 4.5)
+    sigma_A[k] ~ dunif(0.1, 1)
+  }
   
   # ---- per-year population dynamics, reusing the shared kernels ----
   for (y in 1:n_year) {
@@ -42,28 +53,34 @@ model_code <- nimbleCode({
                                                  n_size, pi, x[1:n_size],
                                                  lower[1:n_size], upper[1:n_size],
                                                  ones[1:n_size])
-  for (y in 1:n_year) {
-    wgrowth_N[y, 1:n_size] <- K_overwinter[1:n_size, 1:n_size] %*% 
-      N[n_occ, y, 1:n_size]
+  # winters are only modelled when they're followed by an observed year
+  # (consecutive years) or are the winter after the last year (the
+  # forecast used by the optimization); winter_year[w] is the year the
+  # w-th modelled winter follows, so arrays below stay indexed by year
+  for (w in 1:n_winter) {
+    wgrowth_N[winter_year[w], 1:n_size] <- K_overwinter[1:n_size, 1:n_size] %*% 
+      N[n_occ, winter_year[w], 1:n_size]
     
     ## size-dependent, density-independent overwinter survival: a shared
     ## baseline with a year-specific deviation on the log scale, so it
     ## stays positive
-    S_o[y, 1:n_size] <- overwinter_survival(x[1:n_size],
-                                            exp(mu_eps + eps_y[y]), b_o)
+    S_o[winter_year[w], 1:n_size] <- overwinter_survival(
+      x[1:n_size], exp(mu_eps + eps_y[winter_year[w]]), b_o)
     
     ## year-specific overwinter mortality random effect (non-centred:
     ## eps_y = sigma_o * z_y)
-    z_y[y] ~ dnorm(0, sd = 1)
-    eps_y[y] <- sigma_o * z_y[y]
+    z_y[winter_year[w]] ~ dnorm(0, sd = 1)
+    eps_y[winter_year[w]] <- sigma_o * z_y[winter_year[w]]
     
     # overwinter mortality
-    N_overwinter[y, 1:n_size] <- wgrowth_N[y, 1:n_size] * S_o[y, 1:n_size]
+    N_overwinter[winter_year[w], 1:n_size] <- wgrowth_N[winter_year[w], 1:n_size] *
+      S_o[winter_year[w], 1:n_size]
   }
 
-  # add N_overwinter to the start of the next year, except for the last year
-  for (y in 1:(n_year - 1)) {
-    N[1, y + 1, 1:n_size] <- N_overwinter[y, 1:n_size]
+  # a year that directly follows another observed year starts from that
+  # year's overwinter survivors
+  for (k in 1:n_link) {
+    N[1, link_idx[k], 1:n_size] <- N_overwinter[link_idx[k] - 1, 1:n_size]
   }
 
   # annual adult abundance at the start of each season
@@ -78,7 +95,6 @@ model_code <- nimbleCode({
   for (m in 1:n_year) {
     lambda_R[m] ~ T(dnorm(mu_lambda, sd = sigma_lambda), 0, )
   }
-  lambda_A ~ dunif(0, 100000)
   
   # spread recruits between pulses
   R_1[1:n_year, 1:n_size] <- prop_1 * R[1:n_year, 1:n_size]
@@ -206,10 +222,8 @@ model_code <- nimbleCode({
   # initial population density and annual recruitment
   ##
   
-  # initial adult size (lognormal mean and sd)
-  # (estimated; priors from the earlier IPM fit)
-  log_mu_A ~ dunif(3.25, 4.5)
-  sigma_A ~ dunif(0.1, 1)
+  # initial adult size: estimated per block, with the block-start adults
+  # above
   
   # initial recruit size (mean and sd)
   mu_R <- 0.2156
