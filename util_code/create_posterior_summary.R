@@ -29,6 +29,16 @@ lambdaR_rows <- grep("^lambda_R(\\[|$)", rownames(summary), value = TRUE)
 epsy_rows <- grep("^eps_y\\[", rownames(summary), value = TRUE)
 nadult_rows <- grep("^N_adult\\[", rownames(summary), value = TRUE)
 
+# in the multi-year model, N_adult gives adult abundance in every year
+# (including the first year of each block, where it equals lambda_A), so
+# lambda_A is redundant there and left out
+if (length(nadult_rows) > 0) lambdaA_rows <- character(0)
+
+# the winter after the last year has no data following it, so its eps_y is
+# only a draw from the prior (used for forecasting), not an estimate
+n_year <- max(as.integer(gsub("\\D", "", lambdaR_rows)), 1, na.rm = TRUE)
+epsy_rows <- setdiff(epsy_rows, sprintf("eps_y[%d]", n_year))
+
 # parameters that are only in some model versions (most only when multiple
 # years were fit)
 hyper_rows <- intersect(c("mu_lambda", "sigma_lambda", "mu_eps", "b_o"),
