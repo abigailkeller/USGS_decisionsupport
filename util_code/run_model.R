@@ -231,6 +231,7 @@ run_analysis_reusing_worker <- function(posterior_path, analyze_output_path,
                                model_inputs$n_year, model_inputs$occ_t,
                                model_inputs$occ_y, model_inputs$totalo,
                                model_inputs$x, years, biweek)
+  result$overwinter <- summarize_overwinter(samp_mat, model_inputs$x, years)
 
   tmp <- paste0(analyze_output_path, ".tmp")
   writeLines(jsonlite::toJSON(result, auto_unbox = TRUE, na = "null", digits = NA), tmp)

@@ -1074,6 +1074,106 @@ function renderAnalysisCharts() {
   });
 }
 
+// viridis colour scale (stopping short of the pale yellow end, which is hard
+// to see on white), sampled at t in [0, 1]
+const VIRIDIS_STOPS = ['#440154', '#482878', '#3e4989', '#31688e', '#26828e', '#1f9e89', '#35b779', '#6ece58', '#b5de2b'];
+function viridisColor(t) {
+  const pos = Math.min(1, Math.max(0, t)) * (VIRIDIS_STOPS.length - 1);
+  const i = Math.min(VIRIDIS_STOPS.length - 2, Math.floor(pos));
+  const f = pos - i;
+  const rgb = (hex) => [1, 3, 5].map((k) => parseInt(hex.slice(k, k + 2), 16));
+  const a = rgb(VIRIDIS_STOPS[i]);
+  const b = rgb(VIRIDIS_STOPS[i + 1]);
+  return `rgb(${a.map((v, k) => Math.round(v + (b[k] - v) * f)).join(',')})`;
+}
+
+// "Explore overwinter survival": posterior median and 95% credible band of
+// overwinter survival by size, one line per winter that the data can inform
+// (a winter followed by the next calendar year's data). Only shown when
+// multiple years were uploaded.
+function renderOverwinterChart() {
+  const panel = document.querySelector('#overwinter-panel');
+  const note = document.querySelector('#overwinter-note');
+  const mount = document.querySelector('#chart-overwinter');
+  const ow = analyzeData?.overwinter;
+  panel.hidden = !ow;
+  if (!ow) return;
+
+  const years = ow.years;
+  // winters before a gap in the uploaded years can't be estimated
+  const gapWinters = years.slice(0, -1).filter((year, i) => years[i + 1] !== year + 1).map((year) => `${year} to ${year + 1}`);
+  if (!ow.available || !ow.winters.length) {
+    note.textContent = `None of the uploaded years (${years.join(', ')}) are consecutive, so overwinter survival can't be estimated from these data.`;
+    mount.innerHTML = '';
+    return;
+  }
+  note.textContent = 'Lines show the posterior median and shaded bands the 95% credible interval of the probability that a crab of a given size survives the winter.'
+    + (gapWinters.length ? ` Winters before a gap in the uploaded years (${gapWinters.join(', ')}) can't be estimated and are not shown.` : '');
+
+  const width = 440;
+  const plotHeight = 240;
+  const legendRowHeight = 18;
+  const legendPerRow = 3;
+  const legendHeight = 10 + Math.ceil(ow.winters.length / legendPerRow) * legendRowHeight;
+  const height = plotHeight + legendHeight;
+  const margin = { top: 12, right: 16, bottom: 32, left: 46 };
+  const innerWidth = width - margin.left - margin.right;
+  const innerHeight = plotHeight - margin.top - margin.bottom;
+  const lineColor = cssVar('--line');
+  const mutedColor = cssVar('--muted');
+  const sizes = ow.x;
+
+  // x axis spans the full size range (bin midpoints +/- half a bin), with
+  // ticks every 20 mm
+  const halfBin = (sizes[1] - sizes[0]) / 2 || 0;
+  const xMin = sizes[0] - halfBin;
+  const xMax = sizes[sizes.length - 1] + halfBin;
+  const xTicks = [];
+  for (let t = Math.ceil(xMin / 20) * 20; t <= xMax; t += 20) xTicks.push(t);
+  const yTicks = [0, 0.2, 0.4, 0.6, 0.8, 1];
+  const xScale = (x) => margin.left + ((x - xMin) / (xMax - xMin || 1)) * innerWidth;
+  const yScale = (y) => margin.top + innerHeight - y * innerHeight;
+
+  const gridLines = yTicks.map((tick) => `<line x1="${margin.left}" x2="${width - margin.right}" y1="${yScale(tick)}" y2="${yScale(tick)}" stroke="${lineColor}" stroke-width="1" />`).join('');
+  const yAxisLabels = yTicks.map((tick) => `<text x="${margin.left - 8}" y="${yScale(tick) + 3}" text-anchor="end" font-size="9" fill="${mutedColor}">${tick.toFixed(1)}</text>`).join('');
+  const xAxisLabels = xTicks.map((tick) => `<text x="${xScale(tick)}" y="${plotHeight - margin.bottom + 16}" text-anchor="middle" font-size="9" fill="${mutedColor}">${tick}</text>`).join('');
+
+  const colorFor = (i) => viridisColor(ow.winters.length === 1 ? 0.5 : i / (ow.winters.length - 1));
+  let bands = '';
+  let lines = '';
+  let points = '';
+  let legend = '';
+  ow.winters.forEach((winter, i) => {
+    const color = colorFor(i);
+    const upper = sizes.map((x, k) => `${xScale(x)},${yScale(winter.hi[k])}`);
+    const lower = sizes.map((x, k) => `${xScale(x)},${yScale(winter.lo[k])}`).reverse();
+    bands += `<polygon points="${[...upper, ...lower].join(' ')}" fill="${color}" fill-opacity="0.2" stroke="none" />`;
+    lines += `<polyline points="${sizes.map((x, k) => `${xScale(x)},${yScale(winter.median[k])}`).join(' ')}" fill="none" stroke="${color}" stroke-width="2" />`;
+    points += sizes.map((x, k) => {
+      const tooltip = `${winter.label}\nsize: ${formatAxisNumber(x)} mm\nsurvival: ${winter.median[k].toFixed(2)} (${winter.lo[k].toFixed(2)}, ${winter.hi[k].toFixed(2)} 95% CrI)`;
+      return `<circle class="chart-point" cx="${xScale(x)}" cy="${yScale(winter.median[k])}" r="2.5" fill="${color}" data-tooltip="${escapeHtml(tooltip)}"></circle>`;
+    }).join('');
+    const lx = margin.left + (i % legendPerRow) * 120;
+    const ly = plotHeight + 14 + Math.floor(i / legendPerRow) * legendRowHeight;
+    legend += `<line x1="${lx}" x2="${lx + 16}" y1="${ly - 3}" y2="${ly - 3}" stroke="${color}" stroke-width="3" /><text x="${lx + 22}" y="${ly}" font-size="10" fill="${mutedColor}">${escapeHtml(winter.label)}</text>`;
+  });
+
+  mount.innerHTML = `<svg viewBox="0 0 ${width} ${height}" font-family="'DM Sans', Arial, sans-serif" role="img" aria-label="overwinter survival by size">
+    ${gridLines}
+    <line x1="${margin.left}" x2="${margin.left}" y1="${margin.top}" y2="${plotHeight - margin.bottom}" stroke="${lineColor}" />
+    <line x1="${margin.left}" x2="${width - margin.right}" y1="${plotHeight - margin.bottom}" y2="${plotHeight - margin.bottom}" stroke="${lineColor}" />
+    ${yAxisLabels}
+    ${xAxisLabels}
+    ${bands}
+    ${lines}
+    ${points}
+    <text x="${margin.left + innerWidth / 2}" y="${plotHeight - 4}" text-anchor="middle" font-size="10" fill="${mutedColor}">carapace width (mm)</text>
+    <text x="12" y="${margin.top + innerHeight / 2}" text-anchor="middle" font-size="10" fill="${mutedColor}" transform="rotate(-90 12 ${margin.top + innerHeight / 2})">overwinter survival</text>
+    ${legend}
+  </svg>`;
+  attachChartInteractions(mount);
+}
+
 document.querySelector('#analyze-year-select').addEventListener('change', renderAnalysisCharts);
 document.querySelector('#analyze-time-slider').addEventListener('input', renderAnalysisCharts);
 
@@ -1113,6 +1213,7 @@ function pollAnalyzeProgress() {
           document.querySelector('#analyze-controls').hidden = false;
           panel.hidden = false;
           renderAnalysisCharts();
+          renderOverwinterChart();
           document.querySelector('#regime-next-button').disabled = false;
         }).catch((error) => showError(errorEl, error.message));
       }

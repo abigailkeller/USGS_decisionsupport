@@ -69,6 +69,7 @@ result <- summarize_dynamics(N_post, with_year_dim(CmyModel$C_T), model_inputs$n
                              model_inputs$n_year, model_inputs$occ_t,
                              model_inputs$occ_y, model_inputs$totalo,
                              model_inputs$x, years, biweek)
+result$overwinter <- summarize_overwinter(samp_mat, model_inputs$x, years)
 
 tmp <- paste0(output_path, ".tmp")
 writeLines(jsonlite::toJSON(result, auto_unbox = TRUE, na = "null", digits = NA), tmp)
