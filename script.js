@@ -1,4 +1,4 @@
-const totalSteps = 7;
+const totalSteps = 6;
 let currentStep = 1;
 const uploadedData = { catch: null, effort: null };
 let selectedVisualizationYear = 'all';
@@ -8,7 +8,7 @@ const stepLinks = [...document.querySelectorAll('.step-link')];
 const progressBar = document.querySelector('#progress-bar');
 const progressLabel = document.querySelector('#progress-label');
 const progressStatus = document.querySelector('#progress-status');
-const stepNames = ['Getting started', 'Upload data', 'Data visualization', 'Regime estimation', 'Objective function', 'Model training', 'Optimization results'];
+const stepNames = ['Getting started', 'Upload data', 'Data visualization', 'Regime estimation', 'Objective function', 'Optimization'];
 
 function showError(element, message) {
   element.textContent = message;
@@ -239,8 +239,7 @@ function resetOptimization() {
   document.querySelector('#optimize-run-bar').style.width = '0%';
   document.querySelector('#optimize-run-error').hidden = true;
   if (button) button.disabled = false;
-  document.querySelector('#optimize-download-button').hidden = true;
-  document.querySelector('#optimize-next-button').disabled = true;
+  hideOptimizationResults();
 
   fetch('api/optimize-traps/release', { method: 'POST' }).catch(() => {});
 }
@@ -465,7 +464,6 @@ function canEnterStep(step) {
   if (step <= 2) return true;
   if (!uploadedData.catch || !uploadedData.effort || !document.querySelector('#data-confirmed').checked) return false;
   if (step >= 5 && document.querySelector('#regime-next-button').disabled) return false;
-  if (step >= 7 && document.querySelector('#optimize-next-button').disabled) return false;
   return true;
 }
 
@@ -1299,8 +1297,8 @@ function pollOptimizeProgress() {
           title.textContent = 'Optimization complete';
           copy.textContent = 'Trap schedule saved.';
           bar.style.width = '100%';
-          document.querySelector('#optimize-download-button').hidden = false;
-          document.querySelector('#optimize-next-button').disabled = false;
+          optimizationVersion = Date.now();
+          loadOptimizationResults();
         }
       }
     }).catch(() => {});
@@ -1316,8 +1314,7 @@ document.querySelector('#optimize-run-button').addEventListener('click', (event)
   const errorEl = document.querySelector('#optimize-run-error');
 
   errorEl.hidden = true;
-  document.querySelector('#optimize-download-button').hidden = true;
-  document.querySelector('#optimize-next-button').disabled = true;
+  hideOptimizationResults();
   button.disabled = true;
   ring.classList.remove('is-done');
   bar.style.width = '0%';
@@ -1342,6 +1339,58 @@ document.querySelector('#optimize-run-button').addEventListener('click', (event)
     button.disabled = false;
   });
 });
+
+// ---- Optimization results (shown on step 6 once a run completes) ----
+// The plots are drawn server-side by util_code/optimization_plot.R and
+// optimization_plot_set.R; `optimizationVersion` changes with each completed
+// optimization so the browser fetches fresh plots instead of cached ones.
+let optimizationVersion = 0;
+let loadedResultsVersion = null;
+let loadedAlternativesVersion = null;
+
+function loadPlotImage(img, statusEl, url, loadingText) {
+  img.hidden = true;
+  statusEl.hidden = false;
+  statusEl.textContent = loadingText;
+  img.onload = () => { statusEl.hidden = true; img.hidden = false; };
+  img.onerror = () => {
+    // the server sends the R error as text; fetch it to show why
+    fetch(url).then((response) => response.text()).then((text) => {
+      statusEl.textContent = `Could not draw the plot. ${text}`;
+    }).catch(() => { statusEl.textContent = 'Could not draw the plot.'; });
+  };
+  img.src = url;
+}
+
+function hideOptimizationResults() {
+  document.querySelector('#optimization-result-panel').hidden = true;
+}
+
+function loadOptimizationResults() {
+  document.querySelector('#optimization-result-panel').hidden = false;
+  if (loadedResultsVersion === optimizationVersion) return;
+  loadedResultsVersion = optimizationVersion;
+  loadedAlternativesVersion = null;
+  const exploreButton = document.querySelector('#explore-alternatives-button');
+  exploreButton.hidden = true;
+  loadPlotImage(document.querySelector('#optimization-plot'), document.querySelector('#optimization-plot-status'),
+    `api/optimize-traps/plot/optimal.png?v=${optimizationVersion}`, 'Drawing the optimal trap schedule...');
+  fetch('api/optimize-traps/result').then((response) => parseJsonResponse(response)).then((info) => {
+    // only offer alternatives when the search found more than one schedule
+    exploreButton.hidden = !(info.nOptions > 1);
+  }).catch(() => {});
+}
+
+const alternativesDialog = document.querySelector('#alternatives-dialog');
+document.querySelector('#explore-alternatives-button').addEventListener('click', () => {
+  if (loadedAlternativesVersion !== optimizationVersion) {
+    loadedAlternativesVersion = optimizationVersion;
+    loadPlotImage(document.querySelector('#alternatives-plot'), document.querySelector('#alternatives-plot-status'),
+      `api/optimize-traps/plot/options.png?v=${optimizationVersion}`, 'Drawing the alternative trap schedules...');
+  }
+  alternativesDialog.showModal();
+});
+setupDismissableDialog(alternativesDialog, document.querySelector('#alternatives-close'));
 
 document.querySelector('[data-restart]').addEventListener('click', () => window.location.reload());
 

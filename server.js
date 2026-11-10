@@ -402,6 +402,7 @@ function handleReleaseOptimize(req, res) {
   optimizeInProgress = false;
   fs.rmSync(OPTIMIZE_OUTPUT_PATH, { force: true });
   fs.rmSync(OPTIMIZE_PROGRESS_PATH, { force: true });
+  Object.values(OPTIMIZE_PLOTS).forEach((plot) => fs.rmSync(plot.png, { force: true }));
   sendJson(res, 200, { released });
 }
 
@@ -476,7 +477,77 @@ function handleOptimizeProgress(req, res) {
   });
 }
 
-function handleOptimizeDownload(req, res) {
+// Builds the optimization download CSVs from the results JSON:
+// optimization_summary.csv (the recommended schedule, one row per trapping
+// occasion) and optimization_options.csv (every schedule from the
+// multi-start search, scored on fresh posterior samples; null for results
+// files from before the multi-start search)
+function buildOptimizationCsvs(result) {
+  const toCsv = (rows) => `${rows.map((row) => row.map(csvField).join(',')).join('\n')}\n`;
+  const capitalize = (type) => type[0].toUpperCase() + type.slice(1);
+  const trapTypes = Object.keys(result.schedule);
+
+  const summaryRows = [
+    ['Date', ...trapTypes.map(capitalize)],
+    ...result.occasions.map((day, index) => [julianDayToDateLabel(day), ...trapTypes.map((type) => result.schedule[type][index])]),
+  ];
+
+  let optionsCsv = null;
+  if (Array.isArray(result.options) && result.options.length) {
+    const round = (value, digits) => Number(value).toFixed(digits);
+    const describeSchedule = (schedule) => trapTypes
+      .map((type) => {
+        const placed = result.occasions
+          .map((day, index) => [schedule[type][index], day])
+          .filter(([count]) => count > 0)
+          .map(([count, day]) => `${count} on ${julianDayToDateLabel(day)}`);
+        return placed.length ? `${capitalize(type)}: ${placed.join(', ')}` : null;
+      })
+      .filter(Boolean)
+      .join('; ');
+    const optionRows = [
+      ['Option', 'Recommended', 'Traps per search step', 'Total cost',
+        'Expected abundance at start of next season', 'Abundance 95% CrI lower', 'Abundance 95% CrI upper',
+        'Reduction vs no trapping (%)', 'Difference from best (crabs)', 'Difference 95% lower', 'Difference 95% upper',
+        'Within 1% of best', 'Schedule'],
+      ...result.options.map((option, index) => [
+        index + 1,
+        index === 0 ? 'yes' : 'no',
+        [].concat(option.search_steps).join(' / '),
+        option.total_cost,
+        round(option.expected_abundance, 1),
+        round(option.abundance_95[0], 1),
+        round(option.abundance_95[1], 1),
+        round(100 * option.reduction_vs_no_trapping, 1),
+        round(option.difference_from_best, 2),
+        round(option.difference_from_best_95[0], 1),
+        round(option.difference_from_best_95[1], 1),
+        option.within_1pct_of_best ? 'yes' : 'no',
+        describeSchedule(option.schedule),
+      ]),
+    ];
+    if (result.no_trapping) {
+      optionRows.push(['No trapping', 'no', '', 0,
+        round(result.no_trapping.expected_abundance, 1),
+        round(result.no_trapping.abundance_95[0], 1),
+        round(result.no_trapping.abundance_95[1], 1),
+        '', '', '', '', '', 'No traps']);
+    }
+    // with a single schedule there is nothing to compare it against, so the
+    // columns comparing options with the best one are left out
+    if (result.options.length === 1) {
+      const dropped = new Set(['Recommended', 'Difference from best (crabs)', 'Difference 95% lower',
+        'Difference 95% upper', 'Within 1% of best']);
+      const keep = optionRows[0].map((name, index) => (dropped.has(name) ? -1 : index)).filter((index) => index >= 0);
+      optionRows.forEach((row, rowIndex) => { optionRows[rowIndex] = keep.map((index) => row[index]); });
+    }
+    optionsCsv = toCsv(optionRows);
+  }
+
+  return { summaryCsv: toCsv(summaryRows), optionsCsv };
+}
+
+function readOptimizationResult(res, callback) {
   fs.readFile(OPTIMIZE_OUTPUT_PATH, 'utf8', (err, content) => {
     if (err) { res.writeHead(404); res.end('No optimization results found. Run the optimization first.'); return; }
     let result;
@@ -485,64 +556,20 @@ function handleOptimizeDownload(req, res) {
     } catch (error) {
       res.writeHead(500); res.end('The optimization results file is corrupted.'); return;
     }
-    const toCsv = (rows) => rows.map((row) => row.map(csvField).join(',')).join('\n');
-    const capitalize = (type) => type[0].toUpperCase() + type.slice(1);
-    const trapTypes = Object.keys(result.schedule);
+    callback(result);
+  });
+}
 
-    // recommended (best) schedule: one row per trapping occasion
-    const summaryRows = [
-      ['Date', ...trapTypes.map(capitalize)],
-      ...result.occasions.map((day, index) => [julianDayToDateLabel(day), ...trapTypes.map((type) => result.schedule[type][index])]),
-    ];
-    const files = [{ name: 'optimization_summary.csv', data: Buffer.from(toCsv(summaryRows)) }];
-
-    // options table: every schedule from the multi-start search, scored on
-    // fresh posterior samples (results files from before the multi-start
-    // search have no options, so only the summary is included)
-    if (Array.isArray(result.options) && result.options.length) {
-      const round = (value, digits) => Number(value).toFixed(digits);
-      const describeSchedule = (schedule) => trapTypes
-        .map((type) => {
-          const placed = result.occasions
-            .map((day, index) => [schedule[type][index], day])
-            .filter(([count]) => count > 0)
-            .map(([count, day]) => `${count} on ${julianDayToDateLabel(day)}`);
-          return placed.length ? `${capitalize(type)}: ${placed.join(', ')}` : null;
-        })
-        .filter(Boolean)
-        .join('; ');
-      const optionRows = [
-        ['Option', 'Recommended', 'Traps per search step', 'Total cost',
-          'Expected abundance at start of next season', 'Abundance 95% CrI lower', 'Abundance 95% CrI upper',
-          'Reduction vs no trapping (%)', 'Difference from best (crabs)', 'Difference 95% lower', 'Difference 95% upper',
-          'Within 1% of best', 'Schedule'],
-        ...result.options.map((option, index) => [
-          index + 1,
-          index === 0 ? 'yes' : 'no',
-          [].concat(option.search_steps).join(' / '),
-          option.total_cost,
-          round(option.expected_abundance, 1),
-          round(option.abundance_95[0], 1),
-          round(option.abundance_95[1], 1),
-          round(100 * option.reduction_vs_no_trapping, 1),
-          round(option.difference_from_best, 2),
-          round(option.difference_from_best_95[0], 1),
-          round(option.difference_from_best_95[1], 1),
-          option.within_1pct_of_best ? 'yes' : 'no',
-          describeSchedule(option.schedule),
-        ]),
-      ];
-      if (result.no_trapping) {
-        optionRows.push(['No trapping', 'no', '', 0,
-          round(result.no_trapping.expected_abundance, 1),
-          round(result.no_trapping.abundance_95[0], 1),
-          round(result.no_trapping.abundance_95[1], 1),
-          '', '', '', '', '', 'No traps']);
-      }
-      files.push({ name: 'optimization_options.csv', data: Buffer.from(toCsv(optionRows)) });
-      files.push({ name: 'README.txt', data: Buffer.from(optimizationReadme(result)) });
-    }
-
+// "Download optimization summary": the recommended schedule and its README
+function handleOptimizeDownload(req, res) {
+  readOptimizationResult(res, (result) => {
+    const { summaryCsv, optionsCsv } = buildOptimizationCsvs(result);
+    // with a single option there is no alternatives pop-up to download the
+    // options from, so they are included here (a README covers both files)
+    const single = Boolean(optionsCsv) && result.options.length === 1;
+    const files = [{ name: 'optimization_summary.csv', data: Buffer.from(summaryCsv) }];
+    if (single) files.push({ name: 'optimization_options.csv', data: Buffer.from(optionsCsv) });
+    files.push({ name: 'README.txt', data: Buffer.from(optimizationSummaryReadme(result, single)) });
     res.writeHead(200, {
       'Content-Type': 'application/zip',
       'Content-Disposition': 'attachment; filename="optimization_summary.zip"',
@@ -551,33 +578,227 @@ function handleOptimizeDownload(req, res) {
   });
 }
 
-// README bundled with the optimization download
-function optimizationReadme(result) {
+// "Download trap schedule options" (in the near-optimal alternatives pop-up):
+// every schedule from the multi-start search and its README
+function handleOptimizeOptionsDownload(req, res) {
+  readOptimizationResult(res, (result) => {
+    const { optionsCsv } = buildOptimizationCsvs(result);
+    if (!optionsCsv) { res.writeHead(404); res.end('These optimization results have no alternative schedules.'); return; }
+    res.writeHead(200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': 'attachment; filename="optimization_options.zip"',
+    });
+    res.end(buildZip([
+      { name: 'optimization_options.csv', data: Buffer.from(optionsCsv) },
+      { name: 'README.txt', data: Buffer.from(optimizationOptionsReadme(result)) },
+    ]));
+  });
+}
+
+// what the results page needs to lay itself out (e.g. whether to offer the
+// near-optimal alternatives)
+function handleOptimizeResult(req, res) {
+  readOptimizationResult(res, (result) => {
+    sendJson(res, 200, {
+      budget: result.budget,
+      nOptions: Array.isArray(result.options) ? result.options.length : 1,
+    });
+  });
+}
+
+// Plots of the optimization results, drawn by the R scripts in util_code
+// (optimization_plot.R for the recommended schedule, optimization_plot_set.R
+// for all options) from the same CSVs as the downloads. Each PNG is cached
+// next to the results and redrawn only when the results are newer;
+// concurrent requests for the same plot share one R process.
+const OPTIMIZE_PLOTS = {
+  optimal: { script: 'util_code/optimization_plot.R', png: path.join(POSTERIOR_DIR, 'optimization_plot.png') },
+  options: { script: 'util_code/optimization_plot_set.R', png: path.join(POSTERIOR_DIR, 'optimization_plot_set.png') },
+};
+const plotJobs = {};
+
+function renderOptimizationPlot(which, result) {
+  const plot = OPTIMIZE_PLOTS[which];
+  const resultTime = fs.statSync(OPTIMIZE_OUTPUT_PATH).mtimeMs;
+  if (fs.existsSync(plot.png) && fs.statSync(plot.png).mtimeMs >= resultTime) return Promise.resolve(plot.png);
+  if (plotJobs[which]) return plotJobs[which];
+
+  const { summaryCsv, optionsCsv } = buildOptimizationCsvs(result);
+  if (!optionsCsv) return Promise.reject(new Error('These optimization results have no options to plot.'));
+  const summaryPath = path.join(POSTERIOR_DIR, 'optimization_summary.csv');
+  const optionsPath = path.join(POSTERIOR_DIR, 'optimization_options.csv');
+  fs.writeFileSync(summaryPath, summaryCsv);
+  fs.writeFileSync(optionsPath, optionsCsv);
+  const tmpPng = `${plot.png.slice(0, -4)}.tmp.png`;
+  const args = which === 'optimal'
+    ? [plot.script, summaryPath, optionsPath, tmpPng]
+    : [plot.script, optionsPath, tmpPng];
+
+  plotJobs[which] = new Promise((resolve, reject) => {
+    execFile('Rscript', args, { cwd: ROOT, maxBuffer: 20 * 1024 * 1024 }, (error, stdout, stderr) => {
+      delete plotJobs[which];
+      if (error || !fs.existsSync(tmpPng)) {
+        reject(new Error((stderr || (error && error.message) || 'Could not draw the plot.').trim().split('\n').slice(-3).join('\n')));
+        return;
+      }
+      fs.renameSync(tmpPng, plot.png);
+      resolve(plot.png);
+    });
+  });
+  return plotJobs[which];
+}
+
+function handleOptimizePlot(req, res, which) {
+  if (!OPTIMIZE_PLOTS[which]) { res.writeHead(404); res.end('Unknown plot.'); return; }
+  readOptimizationResult(res, (result) => {
+    renderOptimizationPlot(which, result).then((pngPath) => {
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
+      fs.createReadStream(pngPath).pipe(res);
+    }).catch((error) => {
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end(error.message);
+    });
+  });
+}
+
+// README section describing optimization_summary.csv
+const SUMMARY_CSV_SECTION = `optimization_summary.csv
+-------------------------
+One row per trapping occasion:
+
+  Date          the trapping occasion (day of year shown as a calendar date)
+  Fukui, Minnow, Shrimp
+                number of traps of that type to set on that date (one
+                column per trap type)
+
+The total cost of the schedule (traps of each type multiplied by that type's
+cost) is within the budget.
+`;
+
+// README section describing optimization_options.csv when the search found
+// a single schedule (no columns comparing options)
+const OPTIONS_CSV_SECTION_SINGLE = (result) => `optimization_options.csv
+-------------------------
+The optimal schedule (option 1) and no trapping, for reference. The search
+was run several times with different step sizes (the number of traps added
+at a time), using ${result.n_draw} posterior samples, and every search ended at the
+same schedule. That schedule and no trapping were then scored on ${result.n_draw_score}
+fresh posterior samples (new parameter draws, recruitment, catch randomness
+and winter severity).
+
+  Option                       option number (1 = best)
+  Traps per search step        step size(s) of the search(es) that found it
+  Total cost                   trap units used
+  Expected abundance at start of next season
+                               mean over the fresh posterior samples
+  Abundance 95% CrI lower/upper
+                               95% credible interval of that abundance;
+                               mostly reflects uncertainty about next year's
+                               recruitment and winter, which affects every
+                               schedule alike
+  Reduction vs no trapping (%) expected abundance compared with no trapping
+  Schedule                     traps of each type and the dates they are set
+`;
+
+function describeBudget(result) {
+  const costs = Object.entries(result.cost).map(([type, value]) => `${type} ${value}`).join(', ');
+  return `a budget of ${result.budget} trap units (trap costs: ${costs})`;
+}
+
+// README bundled with "Download optimization summary". With a single
+// option (`withOptions`) the download also includes optimization_options.csv,
+// so the README describes both files.
+function optimizationSummaryReadme(result, withOptions = false) {
+  if (withOptions) {
+    return `OPTIMIZATION SUMMARY — README
+==============================
+
+This download contains the optimal trap schedule found by the optimization
+for ${describeBudget(result)}, and how it compares with no trapping.
+
+The optimization minimizes the expected abundance of crabs at the start of
+the next trapping season, after overwinter mortality, using your fitted
+population model.
+
+${SUMMARY_CSV_SECTION}
+${OPTIONS_CSV_SECTION_SINGLE(result)}`;
+  }
   return `OPTIMIZATION SUMMARY — README
 ==============================
 
-This download contains the trap schedules found by the optimization for a
-budget of ${result.budget} trap units (trap costs: ${Object.entries(result.cost).map(([type, value]) => `${type} ${value}`).join(', ')}).
+This download contains the recommended (optimal) trap schedule found by the
+optimization for ${describeBudget(result)}.
+
+The optimization minimizes the expected abundance of crabs at the start of
+the next trapping season, after overwinter mortality, using your fitted
+population model.
+
+optimization_summary.csv
+-------------------------
+One row per trapping occasion:
+
+  Date          the trapping occasion (day of year shown as a calendar date)
+  Fukui, Minnow, Shrimp
+                number of traps of that type to set on that date (one
+                column per trap type)
+
+The total cost of the schedule (traps of each type multiplied by that type's
+cost) is within the budget.
+
+The objective is often flat, meaning that other trap schedules can produce
+very similar outcomes. Near-optimal alternatives can be explored and
+downloaded in the app with "Explore other near-optimal alternatives".
+`;
+}
+
+// README bundled with "Download trap schedule options"; the column list
+// differs when the search found only one schedule (no comparison columns)
+function optimizationOptionsReadme(result) {
+  const single = Array.isArray(result.options) && result.options.length === 1;
+  const intro = single
+    ? `This download contains the trap schedule found by the optimization for
+${describeBudget(result)}, compared with no trapping.
 
 The optimization minimizes the expected abundance of crabs at the start of
 the next trapping season, after overwinter mortality.
 
-optimization_summary.csv
--------------------------
-The recommended schedule (option 1 in optimization_options.csv): the number
-of traps of each type to set at each trapping occasion.
+How the schedule was found: the search was run several times with different
+step sizes (the number of traps added at a time), using ${result.n_draw}
+posterior samples. Every search ended at the same schedule. That schedule,
+and no trapping for reference, was then scored on ${result.n_draw_score} fresh posterior
+samples (new parameter draws, recruitment, catch randomness and winter
+severity).`
+    : `This download contains near-optimal trap schedules found by the
+optimization for ${describeBudget(result)}.
 
-optimization_options.csv
--------------------------
-The search was run several times with different step sizes (the number of
-traps added at a time), using ${result.n_draw} posterior samples. Because the
-objective is flat near its best value, different searches end at different
-but similarly good schedules. Every distinct schedule found, and no trapping
-for reference, was then scored on ${result.n_draw_score} fresh posterior samples
-(new parameter draws, recruitment, catch randomness and winter severity), so
-the options are compared fairly. Options are sorted best first.
+The optimization minimizes the expected abundance of crabs at the start of
+the next trapping season, after overwinter mortality. The objective is often
+flat, meaning that multiple trap schedules can produce very similar outcomes.
 
-  Option                       option number (1 = best)
+How the options were found: the search was run several times with different
+step sizes (the number of traps added at a time), using ${result.n_draw}
+posterior samples. Different searches can end at different but similarly
+good schedules. Every distinct schedule found, and no trapping for
+reference, was then scored on ${result.n_draw_score} fresh posterior samples (new
+parameter draws, recruitment, catch randomness and winter severity), so the
+options are compared fairly. Options are sorted best first; option 1 is the
+recommended schedule.`;
+
+  const columns = single
+    ? `  Option                       option number (1 = best)
+  Traps per search step        step size(s) of the search(es) that found it
+  Total cost                   trap units used
+  Expected abundance at start of next season
+                               mean over the fresh posterior samples
+  Abundance 95% CrI lower/upper
+                               95% credible interval of that abundance;
+                               mostly reflects uncertainty about next year's
+                               recruitment and winter, which affects every
+                               schedule alike
+  Reduction vs no trapping (%) expected abundance compared with no trapping
+  Schedule                     traps of each type and the dates they are set
+`
+    : `  Option                       option number (1 = best)
   Recommended                  whether this is the recommended schedule
   Traps per search step        step size(s) of the search(es) that found it
   Total cost                   trap units used
@@ -603,6 +824,17 @@ Options with differences close to zero are effectively equivalent; choosing
 among them can be based on practical considerations such as staffing or trap
 availability.
 `;
+
+  return `TRAP SCHEDULE OPTIONS — README
+===============================
+
+${intro}
+
+optimization_options.csv
+-------------------------
+One row per option, plus a final "No trapping" row for reference:
+
+${columns}`;
 }
 
 const server = http.createServer((req, res) => {
@@ -620,6 +852,10 @@ const server = http.createServer((req, res) => {
   if (req.method === 'POST' && pathname === '/api/optimize-traps/release') return handleReleaseOptimize(req, res);
   if (req.method === 'GET' && pathname === '/api/optimize-traps/progress') return handleOptimizeProgress(req, res);
   if (req.method === 'GET' && pathname === '/api/optimize-traps/download') return handleOptimizeDownload(req, res);
+  if (req.method === 'GET' && pathname === '/api/optimize-traps/result') return handleOptimizeResult(req, res);
+  if (req.method === 'GET' && pathname === '/api/optimize-traps/options/download') return handleOptimizeOptionsDownload(req, res);
+  if (req.method === 'GET' && pathname === '/api/optimize-traps/plot/optimal.png') return handleOptimizePlot(req, res, 'optimal');
+  if (req.method === 'GET' && pathname === '/api/optimize-traps/plot/options.png') return handleOptimizePlot(req, res, 'options');
   if (req.method === 'GET') return serveStatic(req, res, pathname);
   res.writeHead(405);
   res.end('Method not allowed');

@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
   && rm -rf /var/lib/apt/lists/*
 
 # R packages used across util_code/*.R
-RUN Rscript -e 'install.packages(c("tidyverse", "nimble", "coda", "MCMCvis", "expm", "jsonlite"))'
+RUN Rscript -e 'install.packages(c("tidyverse", "nimble", "coda", "MCMCvis", "expm", "jsonlite", "patchwork", "bayestestR"))'
 
 WORKDIR /app
 
