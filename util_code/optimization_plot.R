@@ -1,7 +1,7 @@
 library(tidyverse)
 library(patchwork)
 
-# command-line args (used by the app): <summary_csv> <options_csv> <output_png>
+# command-line args (used by the app): <summary_csv> <options_csv> <output_svg_or_png>
 # with no args, plots the test files below and prints the plot
 args <- commandArgs(trailingOnly = TRUE)
 summary_path <- if (length(args) >= 1) args[1] else "data/posterior_samples/test/optimization_summary_drayton_budget30/optimization_summary.csv"
@@ -74,8 +74,22 @@ p <- schedule + right +
   plot_layout(nrow = 1, widths = c(2, 1)) &
   theme(plot.margin = margin(5, 15, 5, 15))
 
+# saves the plot as a vector SVG (used by the app, so it stays sharp at any
+# size) or, for any other extension, as a 300 dpi image. R's built-in Cairo
+# SVG device draws text as shapes, so the SVG looks the same in every browser
+# and needs no extra package.
+save_plot <- function(path, plot, width, height) {
+  if (grepl("\\.svg$", path, ignore.case = TRUE)) {
+    grDevices::svg(path, width = width, height = height, bg = "white")
+    print(plot)
+    invisible(grDevices::dev.off())
+  } else {
+    ggsave(path, plot, width = width, height = height, dpi = 300, bg = "white")
+  }
+}
+
 if (is.na(output_png)) {
   print(p)
 } else {
-  ggsave(output_png, p, width = 10, height = 6, dpi = 150, bg = "white")
+  save_plot(output_png, p, width = 10, height = 6)
 }

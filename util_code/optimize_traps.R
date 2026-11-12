@@ -32,6 +32,10 @@ source("util_code/progress.R")
 # command-line args:
 # <data_dir> <posterior_path> <output_path> <progress_path> <budget>
 # <cost_fukui> <cost_shrimp> <cost_minnow> <n_draw> <n_draw_score>
+# <allowed_types> <max_per_biweek>
+# allowed_types is a comma-separated subset of fukui,shrimp,minnow (trap
+# types the user can set); max_per_biweek is the most effort (in Fukui traps'
+# worth, i.e. trap counts multiplied by cost) allowed at any one occasion
 args <- commandArgs(trailingOnly = TRUE)
 data_dir <- if (length(args) >= 1) args[1] else "data/model_data"
 posterior_path <- if (length(args) >= 2) args[2] else "data/posterior_samples/twopulse.rds"
@@ -46,6 +50,15 @@ cost <- c(
 n_draw <- if (length(args) >= 9) as.integer(args[9]) else 100
 # fresh posterior draws used to score and compare the candidate schedules
 n_score_target <- if (length(args) >= 10) as.integer(args[10]) else 500
+allowed_types <- if (length(args) >= 11 && nzchar(args[11])) {
+  strsplit(args[11], ",", fixed = TRUE)[[1]]
+} else {
+  names(cost)
+}
+allowed_types <- intersect(names(cost), allowed_types)
+if (length(allowed_types) == 0) stop("At least one trap type must be available.")
+max_per_occ <- if (length(args) >= 12) as.numeric(args[12]) else budget
+if (!is.finite(max_per_occ) || max_per_occ <= 0) max_per_occ <- budget
 
 dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
 write_progress <- make_progress_writer(progress_path)
@@ -164,7 +177,12 @@ make_draw <- function(i) {
 }
 
 soak_days <- rep(1, n_occ - 1)
+# schedules keep a column for every trap type (unavailable types stay at 0),
+# but the search only places the available ones
 trap_types <- names(cost)
+search_types <- allowed_types
+# effort already placed at occasion t of schedule n
+occ_effort <- function(n, t) sum(n[t, ] * cost[trap_types])
 
 # transposed kernels, for the draws-as-rows layout
 Kt <- lapply(K, t)
@@ -266,8 +284,11 @@ search_schedule <- function(step, progress_offset, progress_total, label) {
   repeat {
     best <- NULL
     for (t in 1:(n_occ - 1)) {
-      for (type in trap_types) {
-        k <- min(step, floor(remaining_budget / cost[[type]]))
+      # effort still allowed at this occasion under the per-biweek maximum
+      occ_room <- max_per_occ - occ_effort(n, t)
+      for (type in search_types) {
+        k <- min(step, floor(remaining_budget / cost[[type]]),
+                 floor(occ_room / cost[[type]] + 1e-9))
         if (k < 1) next
         candidate <- n
         candidate[t, type] <- candidate[t, type] + as.integer(k)
@@ -284,7 +305,7 @@ search_schedule <- function(step, progress_offset, progress_total, label) {
     current_objective <- best$objective
     remaining_budget <- remaining_budget - best$k * cost[[best$type]]
     write_progress("optimizing", progress_offset + budget - remaining_budget,
-                   progress_total, paste0("Allocating trap units (", label, ")"))
+                   progress_total, paste0("Allocating traps (", label, ")"))
     if (remaining_budget <= 0) break
   }
 
@@ -305,9 +326,9 @@ search_schedule <- function(step, progress_offset, progress_total, label) {
     for (pass in seq_len(max_passes)) {
       improved <- FALSE
       for (t1 in 1:(n_occ - 1)) {
-        for (type1 in trap_types) {
+        for (type1 in search_types) {
           for (t2 in 1:(n_occ - 1)) {
-            for (type2 in trap_types) {
+            for (type2 in search_types) {
               if (t1 == t2 && type1 == type2) next
               remove <- swap * exchange[[type1]][[type2]]["remove"]
               add <- swap * exchange[[type1]][[type2]]["add"]
@@ -319,6 +340,7 @@ search_schedule <- function(step, progress_offset, progress_total, label) {
               candidate[t2, type2] <- candidate[t2, type2] + as.integer(add)
               candidate_cost <- sum(candidate %*% cost[trap_types])
               if (candidate_cost > budget) next
+              if (occ_effort(candidate, t2) > max_per_occ + 1e-9) next
               candidate_objective <- objective(candidate)
               if (candidate_objective < current_objective) {
                 n <- candidate
@@ -390,6 +412,11 @@ options <- lapply(seq_along(schedules), function(k) {
     expected_abundance = mean(totals[, k]),
     abundance_95 = q(totals[, k]),
     reduction_vs_no_trapping = 1 - mean(totals[, k]) / mean(no_trap_totals),
+    # crabs prevented compared with no trapping, paired within each scoring
+    # draw (the scoring draws are the same in every run with the same fitted
+    # model, so this is comparable across runs with different settings)
+    prevented_vs_no_trapping = mean(no_trap_totals - totals[, k]),
+    prevented_vs_no_trapping_95 = q(no_trap_totals - totals[, k]),
     difference_from_best = mean(diff),
     difference_from_best_95 = q(diff),
     within_1pct_of_best = mean(totals[, k]) <= 1.01 * mean(totals[, best]),
@@ -408,6 +435,8 @@ occasions <- biweek[1:(n_occ - 1)]
 result <- list(
   budget = budget,
   cost = as.list(cost),
+  allowed_types = I(allowed_types),
+  max_per_biweek = max_per_occ,
   total_cost = options[[1]]$total_cost,
   n_draw = n_draw,
   n_draw_score = n_score,

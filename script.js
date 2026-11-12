@@ -235,7 +235,7 @@ function resetOptimization() {
   const button = document.querySelector('#optimize-run-button');
   if (ring) ring.classList.remove('is-done');
   document.querySelector('#optimize-run-title').textContent = 'Ready to optimize';
-  document.querySelector('#optimize-run-copy').textContent = 'Finds the trap schedule that minimizes the estimated abundance at the start of the next trapping season within your budget.';
+  document.querySelector('#optimize-run-copy').textContent = 'Finds the trap schedule that minimizes the estimated abundance at the start of the next trapping season using no more than your trapping effort.';
   document.querySelector('#optimize-run-bar').style.width = '0%';
   document.querySelector('#optimize-run-error').hidden = true;
   if (button) button.disabled = false;
@@ -840,6 +840,7 @@ function goToStep(step) {
   window.location.hash = `step-${step}`;
   document.querySelector('.step-content').scrollIntoView({ behavior: 'smooth', block: 'start' });
   if (step === 3) renderVisualizations();
+  if (step === 6) loadScenarios();
 }
 
 document.querySelector('#run-quality-checks').addEventListener('change', (event) => {
@@ -1256,16 +1257,116 @@ document.querySelector('#analyze-run-button').addEventListener('click', (event) 
   });
 });
 
-// trap cost always has a floor of 1 (the cheapest trap type sets the unit
-// scale that the others' costs are relative to)
-document.querySelectorAll('#objective-cost-fukui, #objective-cost-shrimp, #objective-cost-minnow, #objective-budget').forEach((input) => {
+// Trapping effort is counted in Fukui traps' worth: the Fukui trap is the
+// reference (fixed at 1) and every other trap's effort is a whole-number
+// multiple of it, so 1 is the floor for every input.
+const pluralTraps = (n, type) => `${n} ${type} trap${n === 1 ? '' : 's'}`;
+
+// trap types the user has marked available in "Set your constraints"
+const availableTrapTypes = () => [...document.querySelectorAll('.objective-trap-type:checked')].map((box) => box.value);
+// trapping occasions (biweeks) in the planning season
+const N_BIWEEKS = BIWEEK_BREAKS.length - 1;
+
+// "With this effort you could set, for example: ..." under the inputs, so
+// the trade-off between trap types is concrete; only uses available types
+function updateEffortExample() {
+  const budget = Math.floor(Number(document.querySelector('#objective-budget').value));
+  const shrimp = Number(document.querySelector('#objective-cost-shrimp').value);
+  const minnow = Number(document.querySelector('#objective-cost-minnow').value);
+  const el = document.querySelector('#effort-example');
+  if (!(budget >= 1 && shrimp >= 1 && minnow >= 1)) { el.hidden = true; return; }
+  const available = availableTrapTypes();
+  const hasF = available.includes('fukui'), hasM = available.includes('minnow'), hasS = available.includes('shrimp');
+  const examples = [];
+  if (hasF && hasM && minnow === 1) {
+    examples.push(`${budget} Fukui and minnow traps in any mix`);
+  } else {
+    if (hasF) examples.push(pluralTraps(budget, 'Fukui'));
+    if (hasM && Math.floor(budget / minnow) >= 1) examples.push(pluralTraps(Math.floor(budget / minnow), 'minnow'));
+  }
+  if (hasS && Math.floor(budget / shrimp) >= 1) examples.push(pluralTraps(Math.floor(budget / shrimp), 'shrimp'));
+  // roughly half the effort on each of Fukui and shrimp traps
+  const halfShrimp = Math.floor(budget / (2 * shrimp));
+  if (hasF && hasS && halfShrimp >= 1 && budget - halfShrimp * shrimp >= 1) {
+    examples.push(`${budget - halfShrimp * shrimp} Fukui + ${pluralTraps(halfShrimp, 'shrimp')}`);
+  }
+  el.innerHTML = examples.length
+    ? `With this effort you could set, for example: ${examples.map((text) => `<strong>${text}</strong>`).join(', or ')}. The optimizer chooses the mix and timing that leaves the fewest crabs.`
+    : 'This effort isn’t enough to set one trap of the available types. Increase your effort or make more trap types available.';
+  el.hidden = false;
+}
+
+// "Maximum traps per biweek" slider, in Fukui traps' worth: from the budget
+// spread evenly over every biweek up to the whole budget (no limit). Keeps
+// "no limit" when the budget changes if it was already at no limit.
+function updateMaxBiweekSlider() {
+  const slider = document.querySelector('#objective-max-biweek');
+  const budget = Math.max(1, Math.floor(Number(document.querySelector('#objective-budget').value)) || 1);
+  const wasNoLimit = Number(slider.value) >= Number(slider.max);
+  const min = Math.max(1, Math.ceil(budget / N_BIWEEKS));
+  slider.min = String(min);
+  slider.max = String(budget);
+  if (wasNoLimit) slider.value = String(budget);
+  else slider.value = String(Math.min(budget, Math.max(min, Number(slider.value))));
+  updateMaxBiweekLabels();
+}
+
+function updateMaxBiweekLabels() {
+  const slider = document.querySelector('#objective-max-biweek');
+  const value = Number(slider.value);
+  const worth = (n) => `${n} Fukui trap${n === 1 ? '' : 's'}' worth`;
+  document.querySelector('#objective-max-biweek-value').textContent =
+    value >= Number(slider.max) ? `No limit (${worth(value)})` : worth(value);
+  document.querySelector('#objective-max-biweek-min').textContent = `${slider.min} (spread evenly)`;
+  document.querySelector('#objective-max-biweek-max').textContent = `${slider.max} (no limit)`;
+  // example using the current value and shrimp effort
+  const shrimp = Number(document.querySelector('#objective-cost-shrimp').value) || 1;
+  const shrimpTraps = Math.floor(value / shrimp);
+  document.querySelector('#objective-max-biweek-example').textContent =
+    `For example, a maximum of ${value} allows up to ${pluralTraps(value, 'Fukui')}` +
+    (shrimp > 1 ? `, or ${pluralTraps(shrimpTraps, 'shrimp')} (at ${shrimp} each),` : '') +
+    ' in one biweek.';
+}
+
+document.querySelectorAll('#objective-cost-shrimp, #objective-cost-minnow, #objective-budget').forEach((input) => {
+  input.addEventListener('input', () => {
+    updateEffortExample();
+    if (input.id === 'objective-budget') updateMaxBiweekSlider(); else updateMaxBiweekLabels();
+  });
   input.addEventListener('change', () => {
     const value = Number(input.value);
     if (!Number.isFinite(value) || value < 1) input.value = '1';
+    else if (!Number.isInteger(value)) input.value = String(Math.round(value));
+    updateEffortExample();
+    updateMaxBiweekSlider();
     // a changed objective makes any previous optimization out of date
     resetOptimization();
   });
 });
+
+document.querySelector('#objective-max-biweek').addEventListener('input', updateMaxBiweekLabels);
+document.querySelector('#objective-max-biweek').addEventListener('change', () => resetOptimization());
+
+// at least one trap type must stay available; an unavailable type's effort
+// input is disabled since it isn't used
+document.querySelectorAll('.objective-trap-type').forEach((box) => {
+  box.addEventListener('change', () => {
+    const errorEl = document.querySelector('#trap-type-error');
+    if (!availableTrapTypes().length) {
+      box.checked = true;
+      showError(errorEl, 'At least one trap type must be selected.');
+      return;
+    }
+    errorEl.hidden = true;
+    const costInput = document.querySelector(`#objective-cost-${box.value}`);
+    if (box.value !== 'fukui') costInput.disabled = !box.checked;
+    updateEffortExample();
+    resetOptimization();
+  });
+});
+
+updateEffortExample();
+updateMaxBiweekSlider();
 
 let optimizeProgressTimer = null;
 
@@ -1329,7 +1430,11 @@ document.querySelector('#optimize-run-button').addEventListener('click', (event)
   fetch('api/optimize-traps', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ budget, costFukui, costShrimp, costMinnow }),
+    body: JSON.stringify({
+      budget, costFukui, costShrimp, costMinnow,
+      allowedTypes: availableTrapTypes(),
+      maxPerBiweek: Number(document.querySelector('#objective-max-biweek').value),
+    }),
   }).then(async (response) => {
     const result = await parseJsonResponse(response);
     if (!response.ok) throw new Error(result.error || 'Could not start the optimization run.');
@@ -1341,58 +1446,515 @@ document.querySelector('#optimize-run-button').addEventListener('click', (event)
 });
 
 // ---- Optimization results (shown on step 6 once a run completes) ----
-// The plots are drawn server-side by util_code/optimization_plot.R and
-// optimization_plot_set.R; `optimizationVersion` changes with each completed
-// optimization so the browser fetches fresh plots instead of cached ones.
+// R computes the results (optimize_traps.R); the charts are drawn here, in
+// the same style as the other charts. `optimizationVersion` changes with each
+// completed optimization so the results are fetched again.
 let optimizationVersion = 0;
 let loadedResultsVersion = null;
-let loadedAlternativesVersion = null;
+let optimizationInfo = null;
 
-function loadPlotImage(img, statusEl, url, loadingText) {
-  img.hidden = true;
-  statusEl.hidden = false;
-  statusEl.textContent = loadingText;
-  img.onload = () => { statusEl.hidden = true; img.hidden = false; };
-  img.onerror = () => {
-    // the server sends the R error as text; fetch it to show why
-    fetch(url).then((response) => response.text()).then((text) => {
-      statusEl.textContent = `Could not draw the plot. ${text}`;
-    }).catch(() => { statusEl.textContent = 'Could not draw the plot.'; });
-  };
-  img.src = url;
+const TRAP_ORDER = ['fukui', 'minnow', 'shrimp'];
+const trapLabel = (type) => (type === 'fukui' ? 'Fukui' : type[0].toUpperCase() + type.slice(1));
+const optionLabel = (index) => (index === 0 ? 'Optimal' : `Option ${index + 1}`);
+
+// Number of traps of each type on each date, as grouped bars. One panel per
+// entry in `panels` ({ label, schedule }), stacked with a shared y axis. With
+// `usedDatesOnly`, only dates where some panel sets traps are shown.
+function renderScheduleChart(mountId, occasions, panels, { usedDatesOnly = false } = {}) {
+  const mount = document.querySelector(`#${mountId}`);
+  let dateIndexes = occasions.map((_, i) => i);
+  if (usedDatesOnly) {
+    const used = dateIndexes.filter((i) => panels.some((panel) => TRAP_ORDER.some((type) => (panel.schedule[type] || [])[i] > 0)));
+    if (used.length) dateIndexes = used;
+  }
+  const maxCount = Math.max(1, ...panels.flatMap((panel) => TRAP_ORDER.flatMap((type) => dateIndexes.map((i) => (panel.schedule[type] || [])[i] || 0))));
+  const ticks = roundTicks(0, maxCount, 4).filter((t) => Number.isInteger(t));
+  const yMax = ticks[ticks.length - 1];
+
+  const width = 520;
+  const multi = panels.length > 1;
+  const panelHeight = multi ? 120 : 250;
+  const panelGap = multi ? 28 : 0;
+  const legendHeight = 22;
+  const margin = { top: legendHeight + (multi ? 20 : 10), right: 10, bottom: 66, left: 50 };
+  const innerWidth = width - margin.left - margin.right;
+  const height = margin.top + panels.length * panelHeight + (panels.length - 1) * panelGap + margin.bottom;
+  const slot = innerWidth / dateIndexes.length;
+  const barWidth = Math.min(16, (slot * 0.84) / 3);
+  const lineColor = cssVar('--line');
+  const mutedColor = cssVar('--muted');
+  const inkColor = cssVar('--ink');
+
+  // legend across the top
+  let legend = '';
+  let lx = margin.left;
+  TRAP_ORDER.forEach((type) => {
+    legend += `<rect x="${lx}" y="3" width="11" height="11" rx="2" fill="${TRAP_COLORS[type]}" /><text x="${lx + 16}" y="13" font-size="12" fill="${mutedColor}">${trapLabel(type)}</text>`;
+    lx += 78;
+  });
+
+  let body = '';
+  panels.forEach((panel, p) => {
+    const top = margin.top + p * (panelHeight + panelGap);
+    const bottom = top + panelHeight;
+    const yScale = (value) => bottom - (value / yMax) * panelHeight;
+    if (multi) body += `<text x="${margin.left}" y="${top - 6}" font-size="13" font-weight="600" fill="${inkColor}">${escapeHtml(panel.label)}</text>`;
+    body += ticks.map((t) => `<line x1="${margin.left}" x2="${width - margin.right}" y1="${yScale(t)}" y2="${yScale(t)}" stroke="${lineColor}" />`
+      + `<text x="${margin.left - 8}" y="${yScale(t) + 4}" text-anchor="end" font-size="11" fill="${mutedColor}">${t}</text>`).join('');
+    dateIndexes.forEach((i, k) => {
+      const present = TRAP_ORDER.filter((type) => (panel.schedule[type] || [])[i] > 0);
+      const center = margin.left + slot * (k + 0.5);
+      present.forEach((type, j) => {
+        const count = panel.schedule[type][i];
+        const x = center - (present.length * barWidth) / 2 + j * barWidth;
+        const tooltip = `${multi ? `${panel.label}\n` : ''}${occasions[i]}\n${trapLabel(type)}: ${count} trap${count === 1 ? '' : 's'}`;
+        body += `<rect class="chart-point" x="${x}" y="${yScale(count)}" width="${Math.max(1, barWidth - 1)}" height="${bottom - yScale(count)}" fill="${TRAP_COLORS[type]}" data-tooltip="${escapeHtml(tooltip)}"></rect>`;
+      });
+    });
+    body += `<line x1="${margin.left}" x2="${width - margin.right}" y1="${bottom}" y2="${bottom}" stroke="${mutedColor}" stroke-opacity="0.5" />`;
+  });
+
+  const axisY = margin.top + panels.length * panelHeight + (panels.length - 1) * panelGap;
+  const xLabels = dateIndexes.map((i, k) => {
+    const x = margin.left + slot * (k + 0.5);
+    return `<text x="${x}" y="${axisY + 14}" text-anchor="end" font-size="11" fill="${mutedColor}" transform="rotate(-45 ${x} ${axisY + 14})">${occasions[i]}</text>`;
+  }).join('');
+  const plotMid = margin.top + (axisY - margin.top) / 2;
+
+  mount.innerHTML = `<svg viewBox="0 0 ${width} ${height}" font-family="'DM Sans', Arial, sans-serif" role="img" aria-label="number of traps of each type set on each date">
+    <rect x="0" y="0" width="${width}" height="${height}" fill="white" />
+    ${legend}
+    ${body}
+    ${xLabels}
+    <text x="${margin.left + innerWidth / 2}" y="${height - 4}" text-anchor="middle" font-size="12" fill="${mutedColor}">date</text>
+    <text x="13" y="${plotMid}" text-anchor="middle" font-size="12" fill="${mutedColor}" transform="rotate(-90 13 ${plotMid})">number of traps</text>
+  </svg>`;
+  attachChartInteractions(mount);
+}
+
+// Expected abundance at the start of next season (dot) and its 95% credible
+// interval (error bar) for each option and for no trapping, labelled with
+// the value and interval, and each option's reduction vs no trapping.
+function renderAbundanceChart(mountId, rows) {
+  const mount = document.querySelector(`#${mountId}`);
+  // wide left margin so the y-axis title clears the tick labels
+  const margin = { top: 40, right: 8, bottom: 52, left: 72 };
+  // narrower columns when comparing several options
+  const columnWidth = rows.length > 2 ? 76 : 96;
+  const width = margin.left + margin.right + rows.length * columnWidth;
+  const plotHeight = 230;
+  const height = margin.top + plotHeight + margin.bottom;
+  const ticks = roundTicks(0, Math.max(...rows.map((row) => row.hi)), 4);
+  const yMax = ticks[ticks.length - 1];
+  const yScale = (value) => margin.top + plotHeight - (value / yMax) * plotHeight;
+  const lineColor = cssVar('--line');
+  const mutedColor = cssVar('--muted');
+  const inkColor = cssVar('--ink');
+  const axisY = margin.top + plotHeight;
+
+  const grid = ticks.map((t) => `<line x1="${margin.left}" x2="${width - margin.right}" y1="${yScale(t)}" y2="${yScale(t)}" stroke="${lineColor}" />`
+    + `<text x="${margin.left - 8}" y="${yScale(t) + 4}" text-anchor="end" font-size="11" fill="${mutedColor}">${formatCount(t)}</text>`).join('');
+  const marks = rows.map((row, i) => {
+    const x = margin.left + columnWidth * (i + 0.5);
+    const color = row.reference ? mutedColor : inkColor;
+    const tooltip = `${row.label}\nexpected abundance: ${formatCount(row.mean)}`
+      + (row.hasInterval ? `\n95% CrI ${formatCount(row.lo)} to ${formatCount(row.hi)}` : '')
+      + (row.reduction !== null ? `\n${(100 * row.reduction).toFixed(1)}% reduction vs no trapping` : '');
+    return (row.hasInterval
+      ? `<line x1="${x}" x2="${x}" y1="${yScale(row.lo)}" y2="${yScale(row.hi)}" stroke="${color}" stroke-width="1.5" />`
+        + `<line x1="${x - 7}" x2="${x + 7}" y1="${yScale(row.lo)}" y2="${yScale(row.lo)}" stroke="${color}" stroke-width="1.5" />`
+        + `<line x1="${x - 7}" x2="${x + 7}" y1="${yScale(row.hi)}" y2="${yScale(row.hi)}" stroke="${color}" stroke-width="1.5" />`
+      : '')
+      + `<circle class="chart-point" cx="${x}" cy="${yScale(row.mean)}" r="5" fill="${color}" stroke="white" stroke-width="1.5" data-tooltip="${escapeHtml(tooltip)}"></circle>`
+      + `<text x="${x}" y="${yScale(row.hi) - 20}" text-anchor="middle" font-size="12" font-weight="600" fill="${color}">${formatCount(row.mean)}</text>`
+      + (row.hasInterval ? `<text x="${x}" y="${yScale(row.hi) - 7}" text-anchor="middle" font-size="11" fill="${mutedColor}">(${formatCount(row.lo)}–${formatCount(row.hi)})</text>` : '')
+      + `<text x="${x}" y="${axisY + 17}" text-anchor="middle" font-size="12" fill="${color}">${escapeHtml(row.label)}</text>`
+      + (row.reduction !== null ? `<text x="${x}" y="${axisY + 32}" text-anchor="middle" font-size="11" fill="${mutedColor}">−${(100 * row.reduction).toFixed(1)}%</text>` : '');
+  }).join('');
+  const plotMid = margin.top + plotHeight / 2;
+
+  mount.innerHTML = `<svg viewBox="0 0 ${width} ${height}" font-family="'DM Sans', Arial, sans-serif" role="img" aria-label="expected abundance at the start of next season with and without trapping">
+    <rect x="0" y="0" width="${width}" height="${height}" fill="white" />
+    ${grid}
+    <line x1="${margin.left}" x2="${width - margin.right}" y1="${axisY}" y2="${axisY}" stroke="${mutedColor}" stroke-opacity="0.5" />
+    ${marks}
+    <text x="14" y="${plotMid}" text-anchor="middle" font-size="12" fill="${mutedColor}" transform="rotate(-90 14 ${plotMid})">expected abundance</text>
+  </svg>`;
+  attachChartInteractions(mount);
+}
+
+// abundance rows for the chart: the given options, then no trapping
+function abundanceRows(info, optionIndexes) {
+  const rows = optionIndexes.map((index) => {
+    const option = info.options[index];
+    return {
+      label: optionLabel(index),
+      mean: option.expectedAbundance,
+      lo: option.abundance95 ? option.abundance95[0] : option.expectedAbundance,
+      hi: option.abundance95 ? option.abundance95[1] : option.expectedAbundance,
+      hasInterval: Boolean(option.abundance95),
+      reduction: option.reduction,
+    };
+  });
+  if (info.noTrapping) {
+    const nt = info.noTrapping;
+    rows.push({
+      label: 'No trapping',
+      mean: nt.expectedAbundance,
+      lo: nt.abundance95 ? nt.abundance95[0] : nt.expectedAbundance,
+      hi: nt.abundance95 ? nt.abundance95[1] : nt.expectedAbundance,
+      hasInterval: Boolean(nt.abundance95),
+      reduction: null,
+      reference: true,
+    });
+  }
+  return rows;
 }
 
 function hideOptimizationResults() {
   document.querySelector('#optimization-result-panel').hidden = true;
 }
 
+// "This schedule sets 25 shrimp traps, using 100 of your 100 Fukui traps'
+// worth of effort."
+function showEffortSummary(info) {
+  const el = document.querySelector('#optimization-effort-summary');
+  const placed = ['fukui', 'minnow', 'shrimp']
+    .filter((type) => info.traps && info.traps[type] > 0)
+    .map((type) => pluralTraps(info.traps[type], type === 'fukui' ? 'Fukui' : type));
+  if (!placed.length || !Number.isFinite(info.effortUsed)) { el.hidden = true; return; }
+  const list = placed.length > 1 ? `${placed.slice(0, -1).join(', ')} and ${placed[placed.length - 1]}` : placed[0];
+  el.innerHTML = `This schedule sets <strong>${list}</strong>, using ${info.effortUsed} of your ${info.budget} Fukui traps' worth of effort. `
+    + 'The chart on the right compares the expected crab abundance at the start of next season under this optimal trapping schedule with the expected abundance if no traps were set.';
+  el.hidden = false;
+}
+
 function loadOptimizationResults() {
   document.querySelector('#optimization-result-panel').hidden = false;
   if (loadedResultsVersion === optimizationVersion) return;
   loadedResultsVersion = optimizationVersion;
-  loadedAlternativesVersion = null;
+  optimizationInfo = null;
   const exploreButton = document.querySelector('#explore-alternatives-button');
+  const status = document.querySelector('#optimization-plot-status');
+  const charts = document.querySelector('#optimization-charts');
   exploreButton.hidden = true;
-  loadPlotImage(document.querySelector('#optimization-plot'), document.querySelector('#optimization-plot-status'),
-    `api/optimize-traps/plot/optimal.png?v=${optimizationVersion}`, 'Drawing the optimal trap schedule...');
-  fetch('api/optimize-traps/result').then((response) => parseJsonResponse(response)).then((info) => {
+  document.querySelector('#optimization-effort-summary').hidden = true;
+  charts.hidden = true;
+  status.textContent = 'Loading the optimal trap schedule...';
+  status.hidden = false;
+  fetch('api/optimize-traps/result').then(async (response) => {
+    const info = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(info.error || 'Could not load the optimization results.');
+    return info;
+  }).then((info) => {
+    optimizationInfo = info;
+    renderScheduleChart('chart-optimal-schedule', info.occasions, [{ label: 'Optimal', schedule: info.options[0].schedule }]);
+    renderAbundanceChart('chart-optimal-abundance', abundanceRows(info, [0]));
+    status.hidden = true;
+    charts.hidden = false;
     // only offer alternatives when the search found more than one schedule
     exploreButton.hidden = !(info.nOptions > 1);
-  }).catch(() => {});
+    showEffortSummary(info);
+    prepareScenarioSave(info);
+  }).catch((error) => {
+    status.textContent = error.message || 'Could not load the optimization results.';
+  });
+}
+
+// ---- Saved scenarios ----
+// Each completed run can be saved as a scenario; saved scenarios (kept on
+// the server, for the current fitted model only) are compared in a table and
+// a chart of crabs prevented compared with no trapping.
+const TRAP_LABELS = { fukui: 'Fukui', minnow: 'minnow', shrimp: 'shrimp' };
+const formatCount = (value) => Math.round(value).toLocaleString('en-US');
+let savedScenarioForVersion = null;
+
+function describeTrapTypes(types) {
+  if (!types || types.length === 3) return 'all trap types';
+  const labels = types.map((type) => TRAP_LABELS[type] || type);
+  return `${labels.join(' + ')} only`;
+}
+
+function describeBiweekLimit(maxPerBiweek, budget) {
+  return maxPerBiweek >= budget ? 'no biweek limit' : `max ${maxPerBiweek}/biweek`;
+}
+
+// e.g. "500 effort · shrimp only · max 40/biweek"
+function scenarioAutoName(info) {
+  return `${info.budget} effort · ${describeTrapTypes(info.allowedTypes)} · ${describeBiweekLimit(info.maxPerBiweek, info.budget)}`;
+}
+
+function prepareScenarioSave(info) {
+  const button = document.querySelector('#save-scenario-button');
+  const status = document.querySelector('#scenario-save-status');
+  if (savedScenarioForVersion === optimizationVersion) return;
+  document.querySelector('#scenario-name').value = info.savedAs || scenarioAutoName(info);
+  button.disabled = Boolean(info.savedAs);
+  button.textContent = info.savedAs ? 'Saved' : 'Save scenario';
+  status.textContent = info.savedAs ? `Saved as "${info.savedAs}". Change the settings and run again to add another scenario.` : '';
+  status.classList.remove('is-error');
+  status.hidden = !info.savedAs;
+}
+
+document.querySelector('#save-scenario-button').addEventListener('click', (event) => {
+  const button = event.currentTarget;
+  const status = document.querySelector('#scenario-save-status');
+  const name = document.querySelector('#scenario-name').value;
+  button.disabled = true;
+  fetch('api/scenarios', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  }).then(async (response) => {
+    const result = await parseJsonResponse(response);
+    if (!response.ok) throw new Error(result.error || 'Could not save the scenario.');
+    savedScenarioForVersion = optimizationVersion;
+    button.textContent = 'Saved';
+    status.textContent = `Saved as "${result.scenario.name}". Change the settings and run again to add another scenario.`;
+    status.classList.remove('is-error');
+    status.hidden = false;
+    loadScenarios();
+  }).catch((error) => {
+    status.textContent = error.message;
+    status.classList.add('is-error');
+    status.hidden = false;
+    // an already-saved run stays disabled
+    button.disabled = /already saved/.test(error.message);
+  });
+});
+
+document.querySelector('#change-settings-button').addEventListener('click', () => goToStep(5));
+
+function loadScenarios() {
+  fetch('api/scenarios').then((response) => parseJsonResponse(response))
+    .then((data) => renderScenarios(data.scenarios || []))
+    .catch(() => {});
+}
+
+function renderScenarios(scenarios) {
+  const panel = document.querySelector('#scenarios-panel');
+  panel.hidden = scenarios.length === 0;
+  if (!scenarios.length) return;
+  document.querySelector('#scenarios-note').textContent = scenarios.length === 1
+    ? 'One scenario saved. Change the settings and run again, then save that run to compare it with this one.'
+    : `${scenarios.length} scenarios saved. Scenarios are kept until the population model is run again.`;
+
+  const header = '<thead><tr><th scope="col">Scenario</th><th scope="col">Optimal trap schedule</th>'
+    + '<th scope="col">Expected abundance next season</th><th scope="col">Reduction vs no trapping</th><th scope="col"><span class="visually-hidden">Remove</span></th></tr></thead>';
+  const rows = scenarios.map((sc) => {
+    const schedule = scheduleByType(sc);
+    const scheduleHtml = schedule.length
+      ? schedule.map((line) => `<span class="scenario-schedule-line"><span class="scenario-trap-swatch" style="background:${TRAP_COLORS[line.type]}"></span><span><strong>${line.label}:</strong> ${escapeHtml(line.placements)}</span></span>`).join('')
+      : 'no traps';
+    // the suggested name already lists the settings; a custom name doesn't
+    const customName = sc.name !== scenarioAutoName(sc);
+    const settings = customName
+      ? `${sc.budget} effort · ${describeTrapTypes(sc.allowedTypes)} · ${describeBiweekLimit(sc.maxPerBiweek, sc.budget)}`
+      : '';
+    const abundance = `${formatCount(sc.expectedAbundance)}${sc.abundance95 ? `<small>95% CrI ${formatCount(sc.abundance95[0])}–${formatCount(sc.abundance95[1])}</small>` : ''}`;
+    const prevented = scenarioPrevented(sc);
+    const reduction = sc.reduction === null ? '—'
+      : `${(100 * sc.reduction).toFixed(1)}%${prevented !== null ? `<small>${formatCount(prevented)} fewer crabs</small>` : ''}`;
+    return `<tr><th scope="row">${escapeHtml(sc.name)}${settings ? `<small>${escapeHtml(settings)}</small>` : ''}</th>`
+      + `<td class="scenario-schedule">${scheduleHtml}</td><td>${abundance}</td><td>${reduction}</td>`
+      + `<td><button class="scenario-remove" type="button" data-scenario="${sc.id}" aria-label="Remove ${escapeHtml(sc.name)}">×</button></td></tr>`;
+  }).join('');
+  const noTrap = scenarios.find((sc) => sc.noTrapping)?.noTrapping;
+  const noTrapRow = noTrap
+    ? `<tr class="scenario-reference"><th scope="row">No trapping<small>for reference</small></th><td>no traps</td>`
+      + `<td>${formatCount(noTrap.expected_abundance)}${noTrap.abundance_95 ? `<small>95% CrI ${formatCount(noTrap.abundance_95[0])}–${formatCount(noTrap.abundance_95[1])}</small>` : ''}</td><td>—</td><td></td></tr>`
+    : '';
+  document.querySelector('#scenario-table').innerHTML = `${header}<tbody>${rows}${noTrapRow}</tbody>`;
+  document.querySelectorAll('.scenario-remove').forEach((button) => {
+    button.addEventListener('click', () => removeScenario(button.dataset.scenario));
+  });
+  renderScenarioChart(scenarios);
+  lastScenarios = scenarios;
+}
+
+// "Fukui: 3 on Sep 1, 24 on Oct 1" per trap type, in date order
+function scheduleByType(sc) {
+  return ['fukui', 'minnow', 'shrimp']
+    .filter((type) => sc.schedule[type] && sc.schedule[type].some((count) => count > 0))
+    .map((type) => ({
+      type,
+      label: type === 'fukui' ? 'Fukui' : type[0].toUpperCase() + type.slice(1),
+      placements: sc.schedule[type]
+        .map((count, index) => [count, sc.occasions[index]])
+        .filter(([count]) => count > 0)
+        .map(([count, date]) => `${count} on ${date}`)
+        .join(', '),
+    }));
+}
+
+// the comparison table as a CSV, built from the scenarios on screen
+let lastScenarios = [];
+document.querySelector('#scenario-table-download').addEventListener('click', () => {
+  const field = (value) => {
+    const text = value === null || value === undefined ? '' : String(value);
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  const rows = [['Scenario', 'Trapping effort (Fukui traps worth)', 'Effort used', 'Trap types available',
+    'Maximum per biweek (Fukui traps worth)', 'Optimal trap schedule',
+    'Expected abundance at start of next season', 'Abundance 95% CrI lower', 'Abundance 95% CrI upper',
+    'Reduction vs no trapping (%)', 'Fewer crabs than no trapping']];
+  lastScenarios.forEach((sc) => {
+    const prevented = scenarioPrevented(sc);
+    rows.push([
+      sc.name, sc.budget, sc.effortUsed,
+      (sc.allowedTypes || []).map((type) => TRAP_LABELS[type] || type).join('; '),
+      sc.maxPerBiweek >= sc.budget ? 'no limit' : sc.maxPerBiweek,
+      scheduleByType(sc).map((line) => `${line.label}: ${line.placements}`).join('; ') || 'no traps',
+      sc.expectedAbundance.toFixed(1),
+      sc.abundance95 ? sc.abundance95[0].toFixed(1) : '', sc.abundance95 ? sc.abundance95[1].toFixed(1) : '',
+      sc.reduction === null ? '' : (100 * sc.reduction).toFixed(1),
+      prevented === null ? '' : prevented.toFixed(1),
+    ]);
+  });
+  const noTrap = lastScenarios.find((sc) => sc.noTrapping)?.noTrapping;
+  if (noTrap) {
+    rows.push(['No trapping', 0, 0, '', '', 'no traps', noTrap.expected_abundance.toFixed(1),
+      noTrap.abundance_95 ? noTrap.abundance_95[0].toFixed(1) : '', noTrap.abundance_95 ? noTrap.abundance_95[1].toFixed(1) : '', '', '']);
+  }
+  const csv = `${rows.map((row) => row.map(field).join(',')).join('\n')}\n`;
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'scenario_comparison.csv';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+});
+
+// crabs prevented compared with no trapping: paired within each posterior
+// sample when the results include it, otherwise the difference in means
+function scenarioPrevented(sc) {
+  if (sc.prevented !== null && sc.prevented !== undefined) return sc.prevented;
+  if (sc.noTrapping) return sc.noTrapping.expected_abundance - sc.expectedAbundance;
+  return null;
+}
+
+function removeScenario(id) {
+  fetch(`api/scenarios/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    .then(() => {
+      // the current run can be saved again once its scenario is removed
+      savedScenarioForVersion = null;
+      const button = document.querySelector('#save-scenario-button');
+      button.disabled = false;
+      button.textContent = 'Save scenario';
+      document.querySelector('#scenario-save-status').hidden = true;
+      loadScenarios();
+    }).catch(() => {});
+}
+
+// round axis ticks (1, 2 or 5 times a power of ten) covering [min, max]
+function roundTicks(min, max, target = 5) {
+  const span = max - min || 1;
+  const raw = span / target;
+  const magnitude = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 5, 10].map((m) => m * magnitude).find((value) => value >= raw);
+  const ticks = [];
+  for (let t = Math.floor(min / step) * step; t <= max + step * 1e-9; t += step) ticks.push(Math.round(t * 1e6) / 1e6);
+  if (ticks[ticks.length - 1] < max) ticks.push(ticks[ticks.length - 1] + step);
+  return ticks;
+}
+
+// expected abundance at the start of next season (dot) and its 95% credible
+// interval (line) for each scenario and for no trapping, with each
+// scenario's reduction compared with no trapping at the right
+function renderScenarioChart(scenarios) {
+  const mount = document.querySelector('#chart-scenarios');
+  const rows = scenarios.map((sc) => ({
+    name: sc.name,
+    mean: sc.expectedAbundance,
+    lo: sc.abundance95 ? sc.abundance95[0] : sc.expectedAbundance,
+    hi: sc.abundance95 ? sc.abundance95[1] : sc.expectedAbundance,
+    hasInterval: Boolean(sc.abundance95),
+    reduction: sc.reduction,
+  }));
+  const noTrap = scenarios.find((sc) => sc.noTrapping)?.noTrapping;
+  if (noTrap) {
+    rows.push({
+      name: 'No trapping',
+      mean: noTrap.expected_abundance,
+      lo: noTrap.abundance_95 ? noTrap.abundance_95[0] : noTrap.expected_abundance,
+      hi: noTrap.abundance_95 ? noTrap.abundance_95[1] : noTrap.expected_abundance,
+      hasInterval: Boolean(noTrap.abundance_95),
+      reduction: null,
+      reference: true,
+    });
+  }
+  if (!rows.length) { mount.innerHTML = ''; return; }
+
+  const width = 640;
+  const rowHeight = 42;
+  const margin = { top: 12, right: 64, bottom: 40, left: 210 };
+  const innerWidth = width - margin.left - margin.right;
+  const innerHeight = rows.length * rowHeight;
+  const height = margin.top + innerHeight + margin.bottom;
+  const ticks = roundTicks(0, Math.max(...rows.map((r) => r.hi)));
+  const xMax = ticks[ticks.length - 1];
+  const xScale = (value) => margin.left + (value / (xMax || 1)) * innerWidth;
+  const lineColor = cssVar('--line');
+  const mutedColor = cssVar('--muted');
+  const inkColor = cssVar('--ink');
+  const scenarioColor = cssVar('--mint-deep');
+  const axisY = margin.top + innerHeight;
+  // scenario names wrap onto up to two lines (the second cut short if needed)
+  const wrapName = (text, n = 32) => {
+    const lines = [''];
+    for (const word of text.split(' ')) {
+      const line = lines[lines.length - 1];
+      if (line && (line + ' ' + word).length > n) lines.push(word);
+      else lines[lines.length - 1] = line ? `${line} ${word}` : word;
+    }
+    if (lines.length > 2) lines.splice(2, lines.length, `${lines[1]} …`.slice(0, n));
+    if (lines.length === 2 && lines[1].length > n) lines[1] = `${lines[1].slice(0, n - 1)}…`;
+    return lines;
+  };
+
+  const grid = ticks.map((t) => `<line x1="${xScale(t)}" x2="${xScale(t)}" y1="${margin.top}" y2="${axisY}" stroke="${lineColor}" />`
+    + `<text x="${xScale(t)}" y="${axisY + 14}" text-anchor="middle" font-size="10" fill="${mutedColor}">${formatCount(t)}</text>`).join('');
+  const marks = rows.map((row, i) => {
+    const y = margin.top + i * rowHeight + rowHeight / 2;
+    const color = row.reference ? mutedColor : scenarioColor;
+    const tooltip = `${row.name}\nexpected abundance: ${formatCount(row.mean)}`
+      + (row.hasInterval ? ` (95% CrI ${formatCount(row.lo)} to ${formatCount(row.hi)})` : '')
+      + (row.reduction !== null ? `\n${(100 * row.reduction).toFixed(1)}% reduction vs no trapping` : '');
+    const nameLines = wrapName(row.name);
+    const firstY = y + 4 - (nameLines.length - 1) * 6.5;
+    const separator = row.reference ? `<line x1="${margin.left}" x2="${width - margin.right}" y1="${y - rowHeight / 2}" y2="${y - rowHeight / 2}" stroke="${mutedColor}" stroke-dasharray="3 3" />` : '';
+    return separator
+      + `<text x="${margin.left - 12}" y="${firstY}" text-anchor="end" font-size="11" fill="${row.reference ? mutedColor : inkColor}">${nameLines.map((line, k) => `<tspan x="${margin.left - 12}" dy="${k ? 13 : 0}">${escapeHtml(line)}</tspan>`).join('')}</text>`
+      + `<line x1="${xScale(row.lo)}" x2="${xScale(row.hi)}" y1="${y}" y2="${y}" stroke="${color}" stroke-width="2" />`
+      + `<line x1="${xScale(row.lo)}" x2="${xScale(row.lo)}" y1="${y - 5}" y2="${y + 5}" stroke="${color}" stroke-width="2" />`
+      + `<line x1="${xScale(row.hi)}" x2="${xScale(row.hi)}" y1="${y - 5}" y2="${y + 5}" stroke="${color}" stroke-width="2" />`
+      + `<circle class="chart-point" cx="${xScale(row.mean)}" cy="${y}" r="5.5" fill="${color}" stroke="white" stroke-width="1.5" data-tooltip="${escapeHtml(tooltip)}"></circle>`
+      + (row.reduction !== null ? `<text x="${width - margin.right + 10}" y="${y + 4}" font-size="11" fill="${mutedColor}">−${(100 * row.reduction).toFixed(1)}%</text>` : '');
+  }).join('');
+
+  mount.innerHTML = `<svg viewBox="0 0 ${width} ${height}" font-family="'DM Sans', Arial, sans-serif" role="img" aria-label="expected abundance at the start of next season for each saved scenario and for no trapping">
+    <rect x="0" y="0" width="${width}" height="${height}" fill="white" />
+    ${grid}
+    ${marks}
+    <text x="${margin.left + innerWidth / 2}" y="${height - 6}" text-anchor="middle" font-size="10" fill="${mutedColor}">expected abundance at the start of next season</text>
+  </svg>`;
+  attachChartInteractions(mount);
 }
 
 const alternativesDialog = document.querySelector('#alternatives-dialog');
 document.querySelector('#explore-alternatives-button').addEventListener('click', () => {
-  if (loadedAlternativesVersion !== optimizationVersion) {
-    loadedAlternativesVersion = optimizationVersion;
-    loadPlotImage(document.querySelector('#alternatives-plot'), document.querySelector('#alternatives-plot-status'),
-      `api/optimize-traps/plot/options.png?v=${optimizationVersion}`, 'Drawing the alternative trap schedules...');
-  }
+  if (!optimizationInfo) return;
+  const info = optimizationInfo;
+  const indexes = info.options.map((_, i) => i);
+  renderScheduleChart('chart-options-schedule', info.occasions,
+    indexes.map((i) => ({ label: optionLabel(i), schedule: info.options[i].schedule })), { usedDatesOnly: true });
+  renderAbundanceChart('chart-options-abundance', abundanceRows(info, indexes));
   alternativesDialog.showModal();
 });
 setupDismissableDialog(alternativesDialog, document.querySelector('#alternatives-close'));
 
-document.querySelector('[data-restart]').addEventListener('click', () => window.location.reload());
 
 const initialStep = Number(window.location.hash.replace('#step-', ''));
 goToStep(initialStep >= 1 && initialStep <= totalSteps && canEnterStep(initialStep) ? initialStep : 1);

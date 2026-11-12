@@ -21,6 +21,10 @@ const README_PATHS = {
 const OPTIMIZE_PROGRESS_PATH = path.join(POSTERIOR_DIR, 'optimize_progress.json');
 const OPTIMIZE_OUTPUT_PATH = path.join(POSTERIOR_DIR, 'optimal_trap_schedule.json');
 const OPTIMIZE_N_DRAW = 100;
+// saved optimization scenarios, one JSON file each, for comparing settings
+const SCENARIOS_DIR = path.join(POSTERIOR_DIR, 'scenarios');
+// fresh posterior draws used to score the candidate schedules
+const OPTIMIZE_N_DRAW_SCORE = 500;
 const PORT = process.env.PORT || 8000;
 // matches formatDateForExport() in script.js, which always writes dates in this shape
 const EXPORT_DATE_FORMAT = '%m/%d/%Y';
@@ -402,7 +406,6 @@ function handleReleaseOptimize(req, res) {
   optimizeInProgress = false;
   fs.rmSync(OPTIMIZE_OUTPUT_PATH, { force: true });
   fs.rmSync(OPTIMIZE_PROGRESS_PATH, { force: true });
-  Object.values(OPTIMIZE_PLOTS).forEach((plot) => fs.rmSync(plot.png, { force: true }));
   sendJson(res, 200, { released });
 }
 
@@ -425,14 +428,29 @@ function handleOptimizeTraps(req, res) {
     const costShrimp = Number(payload.costShrimp);
     const costMinnow = Number(payload.costMinnow);
     if (!Number.isFinite(budget) || budget < 1) {
-      return sendJson(res, 400, { error: 'Trap unit budget must be at least 1.' });
+      return sendJson(res, 400, { error: "Trapping effort must be at least 1 Fukui trap's worth." });
     }
-    // trap cost is a multiple of the cheapest trap's cost, so 1 is the floor
-    // for every type
+    // effort per trap is a multiple of a Fukui trap's (the reference), so 1
+    // is the floor for every type
     for (const [label, cost] of [['Fukui', costFukui], ['Shrimp', costShrimp], ['Minnow', costMinnow]]) {
       if (!Number.isFinite(cost) || cost < 1) {
-        return sendJson(res, 400, { error: `${label} trap cost must be at least 1.` });
+        return sendJson(res, 400, { error: `${label} trap effort must be at least 1 (a Fukui trap's worth).` });
       }
+    }
+    // constraints: which trap types can be set (at least one), and the most
+    // effort (Fukui traps' worth) at any one biweek, from budget / number of
+    // biweeks up to the whole budget (no limit)
+    const TRAP_TYPES = ['fukui', 'shrimp', 'minnow'];
+    const allowedTypes = Array.isArray(payload.allowedTypes)
+      ? TRAP_TYPES.filter((type) => payload.allowedTypes.includes(type))
+      : TRAP_TYPES;
+    if (!allowedTypes.length) {
+      return sendJson(res, 400, { error: 'Choose at least one available trap type.' });
+    }
+    let maxPerBiweek = Number(payload.maxPerBiweek);
+    if (!Number.isFinite(maxPerBiweek) || maxPerBiweek > budget) maxPerBiweek = budget;
+    if (maxPerBiweek < 1) {
+      return sendJson(res, 400, { error: "Maximum traps per biweek must be at least 1 Fukui trap's worth." });
     }
 
     if (fs.existsSync(OPTIMIZE_PROGRESS_PATH)) fs.rmSync(OPTIMIZE_PROGRESS_PATH, { force: true });
@@ -449,6 +467,9 @@ function handleOptimizeTraps(req, res) {
       String(costShrimp),
       String(costMinnow),
       String(OPTIMIZE_N_DRAW),
+      String(OPTIMIZE_N_DRAW_SCORE),
+      allowedTypes.join(','),
+      String(maxPerBiweek),
     ], { cwd: ROOT, detached: true, stdio: 'ignore' });
     child.unref();
     optimizeChild = child;
@@ -506,7 +527,7 @@ function buildOptimizationCsvs(result) {
       .filter(Boolean)
       .join('; ');
     const optionRows = [
-      ['Option', 'Recommended', 'Traps per search step', 'Total cost',
+      ['Option', 'Recommended', 'Traps per search step', 'Total effort (Fukui traps worth)',
         'Expected abundance at start of next season', 'Abundance 95% CrI lower', 'Abundance 95% CrI upper',
         'Reduction vs no trapping (%)', 'Difference from best (crabs)', 'Difference 95% lower', 'Difference 95% upper',
         'Within 1% of best', 'Schedule'],
@@ -599,64 +620,39 @@ function handleOptimizeOptionsDownload(req, res) {
 // near-optimal alternatives)
 function handleOptimizeResult(req, res) {
   readOptimizationResult(res, (result) => {
+    // traps of each type in the recommended schedule, and the effort they
+    // use in Fukui traps' worth, for the results page's summary sentence
+    const traps = {};
+    let effortUsed = 0;
+    for (const [type, counts] of Object.entries(result.schedule)) {
+      traps[type] = counts.reduce((sum, count) => sum + Number(count), 0);
+      effortUsed += traps[type] * Number(result.cost[type]);
+    }
     sendJson(res, 200, {
       budget: result.budget,
       nOptions: Array.isArray(result.options) ? result.options.length : 1,
-    });
-  });
-}
-
-// Plots of the optimization results, drawn by the R scripts in util_code
-// (optimization_plot.R for the recommended schedule, optimization_plot_set.R
-// for all options) from the same CSVs as the downloads. Each PNG is cached
-// next to the results and redrawn only when the results are newer;
-// concurrent requests for the same plot share one R process.
-const OPTIMIZE_PLOTS = {
-  optimal: { script: 'util_code/optimization_plot.R', png: path.join(POSTERIOR_DIR, 'optimization_plot.png') },
-  options: { script: 'util_code/optimization_plot_set.R', png: path.join(POSTERIOR_DIR, 'optimization_plot_set.png') },
-};
-const plotJobs = {};
-
-function renderOptimizationPlot(which, result) {
-  const plot = OPTIMIZE_PLOTS[which];
-  const resultTime = fs.statSync(OPTIMIZE_OUTPUT_PATH).mtimeMs;
-  if (fs.existsSync(plot.png) && fs.statSync(plot.png).mtimeMs >= resultTime) return Promise.resolve(plot.png);
-  if (plotJobs[which]) return plotJobs[which];
-
-  const { summaryCsv, optionsCsv } = buildOptimizationCsvs(result);
-  if (!optionsCsv) return Promise.reject(new Error('These optimization results have no options to plot.'));
-  const summaryPath = path.join(POSTERIOR_DIR, 'optimization_summary.csv');
-  const optionsPath = path.join(POSTERIOR_DIR, 'optimization_options.csv');
-  fs.writeFileSync(summaryPath, summaryCsv);
-  fs.writeFileSync(optionsPath, optionsCsv);
-  const tmpPng = `${plot.png.slice(0, -4)}.tmp.png`;
-  const args = which === 'optimal'
-    ? [plot.script, summaryPath, optionsPath, tmpPng]
-    : [plot.script, optionsPath, tmpPng];
-
-  plotJobs[which] = new Promise((resolve, reject) => {
-    execFile('Rscript', args, { cwd: ROOT, maxBuffer: 20 * 1024 * 1024 }, (error, stdout, stderr) => {
-      delete plotJobs[which];
-      if (error || !fs.existsSync(tmpPng)) {
-        reject(new Error((stderr || (error && error.message) || 'Could not draw the plot.').trim().split('\n').slice(-3).join('\n')));
-        return;
-      }
-      fs.renameSync(tmpPng, plot.png);
-      resolve(plot.png);
-    });
-  });
-  return plotJobs[which];
-}
-
-function handleOptimizePlot(req, res, which) {
-  if (!OPTIMIZE_PLOTS[which]) { res.writeHead(404); res.end('Unknown plot.'); return; }
-  readOptimizationResult(res, (result) => {
-    renderOptimizationPlot(which, result).then((pngPath) => {
-      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
-      fs.createReadStream(pngPath).pipe(res);
-    }).catch((error) => {
-      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end(error.message);
+      traps,
+      effortUsed,
+      // settings, for the suggested scenario name
+      allowedTypes: Array.isArray(result.allowed_types) ? result.allowed_types : Object.keys(result.cost),
+      maxPerBiweek: Number.isFinite(result.max_per_biweek) ? result.max_per_biweek : result.budget,
+      // the scenario these results are already saved as, if any
+      savedAs: savedScenarioName(),
+      // for the charts drawn in the browser: trapping dates, and each
+      // option's schedule and expected abundance (option 1 = optimal)
+      occasions: result.occasions.map(julianDayToDateLabel),
+      options: (Array.isArray(result.options) && result.options.length
+        ? result.options
+        : [{ schedule: result.schedule, expected_abundance: result.objective_value, abundance_95: null, reduction_vs_no_trapping: null }])
+        .map((option) => ({
+          schedule: option.schedule,
+          expectedAbundance: option.expected_abundance,
+          abundance95: option.abundance_95 || null,
+          reduction: Number.isFinite(option.reduction_vs_no_trapping) ? option.reduction_vs_no_trapping : null,
+        })),
+      noTrapping: result.no_trapping
+        ? { expectedAbundance: result.no_trapping.expected_abundance, abundance95: result.no_trapping.abundance_95 || null }
+        : null,
     });
   });
 }
@@ -671,8 +667,8 @@ One row per trapping occasion:
                 number of traps of that type to set on that date (one
                 column per trap type)
 
-The total cost of the schedule (traps of each type multiplied by that type's
-cost) is within the budget.
+The schedule's total effort (traps of each type multiplied by that type's
+effort per trap, in Fukui traps' worth) is within your trapping effort.
 `;
 
 // README section describing optimization_options.csv when the search found
@@ -688,7 +684,9 @@ and winter severity).
 
   Option                       option number (1 = best)
   Traps per search step        step size(s) of the search(es) that found it
-  Total cost                   trap units used
+  Total effort (Fukui traps worth)
+                               effort the schedule uses: traps of each type
+                               multiplied by that type's effort per trap
   Expected abundance at start of next season
                                mean over the fresh posterior samples
   Abundance 95% CrI lower/upper
@@ -700,9 +698,34 @@ and winter severity).
   Schedule                     traps of each type and the dates they are set
 `;
 
+// wraps a README paragraph to `width` characters
+function wrapText(text, width = 76) {
+  const lines = [];
+  let line = '';
+  for (const word of text.split(/\s+/)) {
+    if (line && line.length + 1 + word.length > width) { lines.push(line); line = word; }
+    else line = line ? `${line} ${word}` : word;
+  }
+  if (line) lines.push(line);
+  return lines.join('\n');
+}
+
 function describeBudget(result) {
-  const costs = Object.entries(result.cost).map(([type, value]) => `${type} ${value}`).join(', ');
-  return `a budget of ${result.budget} trap units (trap costs: ${costs})`;
+  const efforts = Object.entries(result.cost).filter(([type]) => type !== 'fukui')
+    .map(([type, value]) => `${type} ${value}`).join(', ');
+  let text = `a trapping effort of ${result.budget} Fukui traps' worth (effort per trap compared with a Fukui trap: ${efforts})`;
+  // constraints, for results that have them (older results files don't)
+  if (Array.isArray(result.allowed_types)) {
+    text += `, with ${result.allowed_types.length === Object.keys(result.cost).length
+      ? 'all trap types available'
+      : `only ${result.allowed_types.join(' and ')} traps available`}`;
+  }
+  if (Number.isFinite(result.max_per_biweek)) {
+    text += result.max_per_biweek >= result.budget
+      ? ' and no limit on traps per biweek'
+      : ` and at most ${result.max_per_biweek} Fukui traps' worth of traps in any one biweek`;
+  }
+  return text;
 }
 
 // README bundled with "Download optimization summary". With a single
@@ -713,8 +736,7 @@ function optimizationSummaryReadme(result, withOptions = false) {
     return `OPTIMIZATION SUMMARY — README
 ==============================
 
-This download contains the optimal trap schedule found by the optimization
-for ${describeBudget(result)}, and how it compares with no trapping.
+${wrapText(`This download contains the optimal trap schedule found by the optimization for ${describeBudget(result)}, and how it compares with no trapping.`)}
 
 The optimization minimizes the expected abundance of crabs at the start of
 the next trapping season, after overwinter mortality, using your fitted
@@ -726,8 +748,7 @@ ${OPTIONS_CSV_SECTION_SINGLE(result)}`;
   return `OPTIMIZATION SUMMARY — README
 ==============================
 
-This download contains the recommended (optimal) trap schedule found by the
-optimization for ${describeBudget(result)}.
+${wrapText(`This download contains the recommended (optimal) trap schedule found by the optimization for ${describeBudget(result)}.`)}
 
 The optimization minimizes the expected abundance of crabs at the start of
 the next trapping season, after overwinter mortality, using your fitted
@@ -742,8 +763,8 @@ One row per trapping occasion:
                 number of traps of that type to set on that date (one
                 column per trap type)
 
-The total cost of the schedule (traps of each type multiplied by that type's
-cost) is within the budget.
+The schedule's total effort (traps of each type multiplied by that type's
+effort per trap, in Fukui traps' worth) is within your trapping effort.
 
 The objective is often flat, meaning that other trap schedules can produce
 very similar outcomes. Near-optimal alternatives can be explored and
@@ -756,8 +777,7 @@ downloaded in the app with "Explore other near-optimal alternatives".
 function optimizationOptionsReadme(result) {
   const single = Array.isArray(result.options) && result.options.length === 1;
   const intro = single
-    ? `This download contains the trap schedule found by the optimization for
-${describeBudget(result)}, compared with no trapping.
+    ? `${wrapText(`This download contains the trap schedule found by the optimization for ${describeBudget(result)}, compared with no trapping.`)}
 
 The optimization minimizes the expected abundance of crabs at the start of
 the next trapping season, after overwinter mortality.
@@ -768,8 +788,7 @@ posterior samples. Every search ended at the same schedule. That schedule,
 and no trapping for reference, was then scored on ${result.n_draw_score} fresh posterior
 samples (new parameter draws, recruitment, catch randomness and winter
 severity).`
-    : `This download contains near-optimal trap schedules found by the
-optimization for ${describeBudget(result)}.
+    : `${wrapText(`This download contains near-optimal trap schedules found by the optimization for ${describeBudget(result)}.`)}
 
 The optimization minimizes the expected abundance of crabs at the start of
 the next trapping season, after overwinter mortality. The objective is often
@@ -787,7 +806,9 @@ recommended schedule.`;
   const columns = single
     ? `  Option                       option number (1 = best)
   Traps per search step        step size(s) of the search(es) that found it
-  Total cost                   trap units used
+  Total effort (Fukui traps worth)
+                               effort the schedule uses: traps of each type
+                               multiplied by that type's effort per trap
   Expected abundance at start of next season
                                mean over the fresh posterior samples
   Abundance 95% CrI lower/upper
@@ -801,7 +822,9 @@ recommended schedule.`;
     : `  Option                       option number (1 = best)
   Recommended                  whether this is the recommended schedule
   Traps per search step        step size(s) of the search(es) that found it
-  Total cost                   trap units used
+  Total effort (Fukui traps worth)
+                               effort the schedule uses: traps of each type
+                               multiplied by that type's effort per trap
   Expected abundance at start of next season
                                mean over the fresh posterior samples
   Abundance 95% CrI lower/upper
@@ -837,6 +860,110 @@ One row per option, plus a final "No trapping" row for reference:
 ${columns}`;
 }
 
+// ---- Saved scenarios ----
+// Each completed optimization can be saved as a scenario (a copy of its
+// results plus a name), so runs with different effort and constraints can be
+// compared. A scenario records the fitted model it came from (the posterior
+// file's modification time): results from different fits aren't comparable,
+// so scenarios from any other fit are discarded when scenarios are listed.
+function posteriorStamp() {
+  try { return fs.statSync(OUTPUT_PATH).mtimeMs; } catch (error) { return null; }
+}
+
+function readScenarios() {
+  if (!fs.existsSync(SCENARIOS_DIR)) return [];
+  const stamp = posteriorStamp();
+  const scenarios = [];
+  for (const file of fs.readdirSync(SCENARIOS_DIR).filter((name) => name.endsWith('.json'))) {
+    const filePath = path.join(SCENARIOS_DIR, file);
+    let scenario;
+    try { scenario = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (error) { scenario = null; }
+    if (!scenario || stamp === null || scenario.posteriorStamp !== stamp) {
+      fs.rmSync(filePath, { force: true });
+      continue;
+    }
+    scenarios.push(scenario);
+  }
+  return scenarios.sort((a, b) => a.savedAt - b.savedAt);
+}
+
+// name of the saved scenario holding the current optimization results
+function savedScenarioName() {
+  try {
+    const stamp = fs.statSync(OPTIMIZE_OUTPUT_PATH).mtimeMs;
+    const match = readScenarios().find((scenario) => scenario.resultStamp === stamp);
+    return match ? match.name : null;
+  } catch (error) { return null; }
+}
+
+// what the comparison table and chart need from a scenario
+function summarizeScenario(scenario) {
+  const result = scenario.result;
+  const best = Array.isArray(result.options) && result.options.length ? result.options[0] : null;
+  const traps = {};
+  let effortUsed = 0;
+  for (const [type, counts] of Object.entries(result.schedule)) {
+    traps[type] = counts.reduce((sum, count) => sum + Number(count), 0);
+    effortUsed += traps[type] * Number(result.cost[type]);
+  }
+  return {
+    id: scenario.id,
+    name: scenario.name,
+    budget: result.budget,
+    cost: result.cost,
+    allowedTypes: Array.isArray(result.allowed_types) ? result.allowed_types : Object.keys(result.cost),
+    maxPerBiweek: Number.isFinite(result.max_per_biweek) ? result.max_per_biweek : result.budget,
+    traps,
+    effortUsed,
+    occasions: result.occasions.map(julianDayToDateLabel),
+    schedule: result.schedule,
+    expectedAbundance: best ? best.expected_abundance : result.objective_value,
+    abundance95: best ? best.abundance_95 : null,
+    reduction: best ? best.reduction_vs_no_trapping : null,
+    prevented: best && Number.isFinite(best.prevented_vs_no_trapping) ? best.prevented_vs_no_trapping : null,
+    prevented95: best && Array.isArray(best.prevented_vs_no_trapping_95) ? best.prevented_vs_no_trapping_95 : null,
+    noTrapping: result.no_trapping || null,
+  };
+}
+
+function handleListScenarios(req, res) {
+  sendJson(res, 200, { scenarios: readScenarios().map(summarizeScenario) });
+}
+
+// saves the current optimization results as a scenario
+function handleSaveScenario(req, res) {
+  readBody(req).then((raw) => {
+    let payload = {};
+    try { payload = raw ? JSON.parse(raw) : {}; } catch (error) { payload = {}; }
+    if (!fs.existsSync(OPTIMIZE_OUTPUT_PATH)) {
+      return sendJson(res, 404, { error: 'No optimization results to save. Run the optimization first.' });
+    }
+    const stamp = posteriorStamp();
+    if (stamp === null) return sendJson(res, 400, { error: 'Run the population model first.' });
+    let result;
+    try { result = JSON.parse(fs.readFileSync(OPTIMIZE_OUTPUT_PATH, 'utf8')); } catch (error) {
+      return sendJson(res, 500, { error: 'The optimization results file is corrupted.' });
+    }
+    const resultStamp = fs.statSync(OPTIMIZE_OUTPUT_PATH).mtimeMs;
+    const existing = readScenarios();
+    // the same run saved twice would just duplicate a row
+    const duplicate = existing.find((scenario) => scenario.resultStamp === resultStamp);
+    if (duplicate) return sendJson(res, 409, { error: `These results are already saved as "${duplicate.name}".` });
+    const name = String(payload.name || '').trim().slice(0, 80) || `Scenario ${existing.length + 1}`;
+    const id = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const scenario = { id, name, savedAt: Date.now(), posteriorStamp: stamp, resultStamp, result };
+    fs.mkdirSync(SCENARIOS_DIR, { recursive: true });
+    fs.writeFileSync(path.join(SCENARIOS_DIR, `${id}.json`), JSON.stringify(scenario));
+    sendJson(res, 200, { scenario: summarizeScenario(scenario) });
+  });
+}
+
+function handleDeleteScenario(req, res, id) {
+  if (!/^s[a-z0-9]+$/.test(id)) return sendJson(res, 400, { error: 'Unknown scenario.' });
+  fs.rmSync(path.join(SCENARIOS_DIR, `${id}.json`), { force: true });
+  sendJson(res, 200, { deleted: id });
+}
+
 const server = http.createServer((req, res) => {
   const { pathname } = new URL(req.url, `http://${req.headers.host}`);
   if (req.method === 'POST' && pathname === '/api/prepare-data') return handlePrepareData(req, res);
@@ -854,8 +981,9 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && pathname === '/api/optimize-traps/download') return handleOptimizeDownload(req, res);
   if (req.method === 'GET' && pathname === '/api/optimize-traps/result') return handleOptimizeResult(req, res);
   if (req.method === 'GET' && pathname === '/api/optimize-traps/options/download') return handleOptimizeOptionsDownload(req, res);
-  if (req.method === 'GET' && pathname === '/api/optimize-traps/plot/optimal.png') return handleOptimizePlot(req, res, 'optimal');
-  if (req.method === 'GET' && pathname === '/api/optimize-traps/plot/options.png') return handleOptimizePlot(req, res, 'options');
+  if (req.method === 'GET' && pathname === '/api/scenarios') return handleListScenarios(req, res);
+  if (req.method === 'POST' && pathname === '/api/scenarios') return handleSaveScenario(req, res);
+  if (req.method === 'DELETE' && pathname.startsWith('/api/scenarios/')) return handleDeleteScenario(req, res, pathname.slice('/api/scenarios/'.length));
   if (req.method === 'GET') return serveStatic(req, res, pathname);
   res.writeHead(405);
   res.end('Method not allowed');

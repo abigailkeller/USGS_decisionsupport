@@ -1,5 +1,3 @@
-Option,Recommended,Traps per search step,Total cost,Expected abundance at start of next season,Abundance 95% CrI lower,Abundance 95% CrI upper,Reduction vs no trapping (%),Difference from best (crabs),Difference 95% lower,Difference 95% upper,Within 1% of best,Schedule
-1,yes,1,30,754.9,97.4,2767.5,0.4,0.00,0.0,0.0,yes,"Minnow: 1 on Aug 17, 3 on Sep 1, 2 on Sep 16, 24 on Oct 1"
-2,no,5,30,754.9,97.4,2764.5,0.4,0.05,-2.6,2.5,yes,"Minnow: 15 on Sep 16, 10 on Oct 1, 5 on Nov 1"
-3,no,2,30,755.0,97.2,2765.1,0.4,0.12,-2.3,2.7,yes,"Minnow: 2 on Sep 16, 12 on Oct 1, 16 on Nov 1"
-No trapping,no,,0,758.3,97.4,2783.0,,,,,,No traps
+Option,Traps per search step,Total effort (Fukui traps worth),Expected abundance at start of next season,Abundance 95% CrI lower,Abundance 95% CrI upper,Reduction vs no trapping (%),Schedule
+1,1 / 3 / 6 / 15,200,6846.9,746.1,24658.8,4.2,"Minnow: 100 on Jul 1, 100 on Jul 17"
+No trapping,,0,7146.8,771.2,26021.7,,No traps
