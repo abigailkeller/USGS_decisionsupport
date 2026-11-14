@@ -1073,6 +1073,138 @@ function renderAnalysisCharts() {
   });
 }
 
+// ---- "What to plot" in Analyze results ----
+// Switches between the size-structured abundance charts, overwinter
+// survival (only offered when a winter between consecutive years can be
+// estimated) and the adults / recruits box plots.
+function overwinterAvailable() {
+  const ow = analyzeData?.overwinter;
+  return Boolean(ow && ow.available && ow.winters && ow.winters.length);
+}
+
+function setupAnalysisViews() {
+  const select = document.querySelector('#analysis-view-select');
+  const overwinterOption = select.querySelector('option[value="overwinter"]');
+  const available = overwinterAvailable();
+  overwinterOption.hidden = !available;
+  overwinterOption.disabled = !available;
+  if (!available && select.value === 'overwinter') select.value = 'size';
+  showAnalysisView(select.value);
+}
+
+function showAnalysisView(view) {
+  document.querySelectorAll('[data-analysis-view]').forEach((el) => { el.hidden = el.dataset.analysisView !== view; });
+  if (view === 'population') renderPopulationCharts();
+}
+
+document.querySelector('#analysis-view-select').addEventListener('change', (event) => showAnalysisView(event.target.value));
+
+const BOX_NOTE = 'Boxes show the middle 50% of posterior samples, the line inside each box the median, and the whiskers the 95% credible interval.';
+
+// Box-and-whisker chart of posterior summaries ({ lo, q1, median, q3, hi }).
+// `groups` are x-axis categories, each with one or more boxes
+// ({ name, stats, color }); boxes with the same name share a colour and a
+// legend entry.
+function renderBoxChart(mountId, groups, { yLabel, format = formatCount, yMax = null, tooltipFormat = format } = {}) {
+  const mount = document.querySelector(`#${mountId}`);
+  const names = [...new Set(groups.flatMap((g) => g.boxes.map((b) => b.name)))];
+  const showLegend = names.length > 1;
+  // sized to the results column so the text isn't shrunk
+  const width = 440;
+  const plotHeight = 210;
+  const legendHeight = showLegend ? 22 : 0;
+  const margin = { top: 14 + legendHeight, right: 10, bottom: 34, left: 64 };
+  const height = margin.top + plotHeight + margin.bottom;
+  const innerWidth = width - margin.left - margin.right;
+  const top = yMax ?? Math.max(...groups.flatMap((g) => g.boxes.map((b) => b.stats.hi)));
+  const ticks = yMax !== null ? [0, 0.25, 0.5, 0.75, 1].map((t) => t * yMax) : roundTicks(0, top, 4);
+  const max = ticks[ticks.length - 1] || 1;
+  const yScale = (value) => margin.top + plotHeight - (value / max) * plotHeight;
+  const slot = innerWidth / groups.length;
+  const perGroup = Math.max(...groups.map((g) => g.boxes.length));
+  const boxWidth = Math.min(46, (slot * 0.7) / perGroup);
+  const lineColor = cssVar('--line');
+  const mutedColor = cssVar('--muted');
+  const inkColor = cssVar('--ink');
+  const axisY = margin.top + plotHeight;
+
+  let legend = '';
+  if (showLegend) {
+    let lx = margin.left;
+    names.forEach((name) => {
+      const color = groups.flatMap((g) => g.boxes).find((b) => b.name === name).color;
+      legend += `<rect x="${lx}" y="4" width="11" height="11" rx="2" fill="${color}" fill-opacity="0.35" stroke="${color}" /><text x="${lx + 16}" y="13" font-size="11" fill="${mutedColor}">${escapeHtml(name)}</text>`;
+      lx += 22 + name.length * 6.5;
+    });
+  }
+  const grid = ticks.map((t) => `<line x1="${margin.left}" x2="${width - margin.right}" y1="${yScale(t)}" y2="${yScale(t)}" stroke="${lineColor}" />`
+    + `<text x="${margin.left - 8}" y="${yScale(t) + 4}" text-anchor="end" font-size="11" fill="${mutedColor}">${format(t)}</text>`).join('');
+  const marks = groups.map((group, g) => {
+    const center = margin.left + slot * (g + 0.5);
+    const boxes = group.boxes.map((box, k) => {
+      const x = center - (group.boxes.length * boxWidth) / 2 + k * boxWidth + boxWidth / 2;
+      const half = boxWidth * 0.4;
+      const st = box.stats;
+      const tooltip = `${group.label}${box.name ? ` · ${box.name}` : ''}\nmedian: ${tooltipFormat(st.median)}\nmiddle 50%: ${tooltipFormat(st.q1)} to ${tooltipFormat(st.q3)}\n95% CrI: ${tooltipFormat(st.lo)} to ${tooltipFormat(st.hi)}`;
+      return `<line x1="${x}" x2="${x}" y1="${yScale(st.hi)}" y2="${yScale(st.q3)}" stroke="${box.color}" stroke-width="1.5" />`
+        + `<line x1="${x}" x2="${x}" y1="${yScale(st.q1)}" y2="${yScale(st.lo)}" stroke="${box.color}" stroke-width="1.5" />`
+        + `<line x1="${x - half / 2}" x2="${x + half / 2}" y1="${yScale(st.hi)}" y2="${yScale(st.hi)}" stroke="${box.color}" stroke-width="1.5" />`
+        + `<line x1="${x - half / 2}" x2="${x + half / 2}" y1="${yScale(st.lo)}" y2="${yScale(st.lo)}" stroke="${box.color}" stroke-width="1.5" />`
+        + `<rect class="chart-point" x="${x - half}" y="${yScale(st.q3)}" width="${half * 2}" height="${Math.max(1, yScale(st.q1) - yScale(st.q3))}" fill="${box.color}" fill-opacity="0.3" stroke="${box.color}" stroke-width="1.5" data-tooltip="${escapeHtml(tooltip)}"></rect>`
+        + `<line x1="${x - half}" x2="${x + half}" y1="${yScale(st.median)}" y2="${yScale(st.median)}" stroke="${box.color}" stroke-width="2.5" />`;
+    }).join('');
+    return boxes + `<text x="${center}" y="${axisY + 18}" text-anchor="middle" font-size="11" fill="${inkColor}">${escapeHtml(group.label)}</text>`;
+  }).join('');
+  const plotMid = margin.top + plotHeight / 2;
+  mount.innerHTML = `<svg viewBox="0 0 ${width} ${height}" font-family="'DM Sans', Arial, sans-serif" role="img" aria-label="${escapeHtml(yLabel)}">
+    <rect x="0" y="0" width="${width}" height="${height}" fill="white" />
+    ${legend}
+    ${grid}
+    <line x1="${margin.left}" x2="${width - margin.right}" y1="${axisY}" y2="${axisY}" stroke="${mutedColor}" stroke-opacity="0.5" />
+    ${marks}
+    <text x="14" y="${plotMid}" text-anchor="middle" font-size="12" fill="${mutedColor}" transform="rotate(-90 14 ${plotMid})">${escapeHtml(yLabel)}</text>
+  </svg>`;
+  attachChartInteractions(mount);
+}
+
+function renderPopulationCharts() {
+  const pop = analyzeData?.population;
+  const note = document.querySelector('#population-note');
+  const panels = ['#recruits-panel', '#adults-panel', '#pulses-panel'].map((id) => document.querySelector(id));
+  if (!pop) {
+    // results from before this view existed don't include these summaries
+    note.textContent = 'These charts need the latest analysis. Click "Analyze results" again to see them.';
+    note.hidden = false;
+    panels.forEach((panel) => { panel.hidden = true; });
+    return;
+  }
+  note.hidden = true;
+  panels.forEach((panel) => { panel.hidden = false; });
+
+  const recruitColor = '#3e4989';
+  const adultColor = '#4a9974';
+  renderBoxChart('chart-recruits', pop.recruits.map((r) => ({ label: String(r.year), boxes: [{ stats: r, color: recruitColor }] })),
+    { yLabel: 'recruits' });
+  renderBoxChart('chart-adults', pop.adults.map((a) => ({ label: String(a.year), boxes: [{ stats: a, color: adultColor }] })),
+    { yLabel: 'adults' });
+
+  const [day1, day2] = pop.pulse_days.map((day) => formatDateShort(julianDayToDate(day)));
+  const firstColor = '#31688e';
+  const secondColor = '#6ece58';
+  const percent = (value) => `${Math.round(value * 100)}%`;
+  const percentDetailed = (value) => `${(value * 100).toFixed(1)}%`;
+  const groups = pop.pulses_by_year
+    ? pop.pulses.map((p) => ({ label: String(p.year), boxes: [
+      { name: `${day1} pulse`, stats: p.first, color: firstColor },
+      { name: `${day2} pulse`, stats: p.second, color: secondColor }] }))
+    : [{ label: `${day1} pulse`, boxes: [{ stats: pop.pulses[0].first, color: firstColor }] },
+      { label: `${day2} pulse`, boxes: [{ stats: pop.pulses[0].second, color: secondColor }] }];
+  renderBoxChart('chart-pulses', groups, { yLabel: 'proportion of recruits', yMax: 1, format: percent, tooltipFormat: percentDetailed });
+  document.querySelector('#pulses-note').textContent = `The proportion of each year's recruits that enter the population in each of the model's two recruitment pulses, on ${day1} and ${day2}. The two proportions add up to 100%.`
+    + (pop.pulses_by_year ? ' Each year has its own split.' : ' The model estimates one split that applies to every year.')
+    + ` ${BOX_NOTE}`;
+}
+
 // viridis colour scale (stopping short of the pale yellow end, which is hard
 // to see on white), sampled at t in [0, 1]
 const VIRIDIS_STOPS = ['#440154', '#482878', '#3e4989', '#31688e', '#26828e', '#1f9e89', '#35b779', '#6ece58', '#b5de2b'];
@@ -1204,7 +1336,7 @@ function pollAnalyzeProgress() {
         }
         ring.classList.add('is-done');
         title.textContent = 'Analysis complete';
-        copy.textContent = 'Explore estimated abundance and CPUE by year and time period.';
+        copy.textContent = 'Use "What to plot" to explore the results.';
         bar.style.width = '100%';
         fetch('api/analyze-results/data').then((response) => parseJsonResponse(response)).then((data) => {
           analyzeData = data;
@@ -1213,6 +1345,7 @@ function pollAnalyzeProgress() {
           panel.hidden = false;
           renderAnalysisCharts();
           renderOverwinterChart();
+          setupAnalysisViews();
           document.querySelector('#regime-next-button').disabled = false;
         }).catch((error) => showError(errorEl, error.message));
       }

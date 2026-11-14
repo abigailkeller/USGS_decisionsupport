@@ -106,3 +106,57 @@ summarize_overwinter <- function(samp_mat, x, years, ci = 0.95) {
   list(available = TRUE, years = as.list(as.integer(years)),
        x = as.list(x), winters = winters)
 }
+
+# Posterior box-plot statistics for the frontend's "Adults and recruit
+# abundance" charts: annual recruit abundance (lambda_R), adult abundance at
+# the start of each year, and the proportion of recruits entering in each of
+# the two recruitment pulses (prop_1 and 1 - prop_1). Each summary is the
+# 2.5%, 25%, 50%, 75% and 97.5% quantiles (whiskers = 95% credible interval,
+# box = middle 50%).
+#   Adults: N_adult[y] in the multi-year model (adults surviving the winter
+#   in later years of a consecutive run); lambda_A[y] in the independent-years
+#   model; lambda_A in the one-year model.
+#   Pulse proportions: one pair per year when prop_1 is indexed by year
+#   (independent years), otherwise a single pair shared by all years.
+# `pulse_days` are the days of year the two pulses enter the population.
+summarize_population <- function(samp_mat, years, pulse_days) {
+  years <- as.integer(years)
+  n_year <- length(years)
+  box <- function(v) {
+    q <- unname(quantile(v, c(0.025, 0.25, 0.5, 0.75, 0.975)))
+    list(lo = q[1], q1 = q[2], median = q[3], q3 = q[4], hi = q[5], mean = mean(v))
+  }
+  # one column per year: "name[y]" if indexed, else the scalar column
+  per_year <- function(name) {
+    indexed <- sprintf("%s[%d]", name, seq_len(n_year))
+    if (all(indexed %in% colnames(samp_mat))) return(indexed)
+    if (name %in% colnames(samp_mat) && n_year == 1) return(name)
+    NULL
+  }
+  by_year <- function(cols) {
+    if (is.null(cols)) return(list())
+    lapply(seq_along(cols), function(y) c(list(year = years[y]), box(samp_mat[, cols[y]])))
+  }
+
+  recruit_cols <- per_year("lambda_R")
+  adult_cols <- per_year("N_adult")
+  if (is.null(adult_cols)) adult_cols <- per_year("lambda_A")
+
+  prop_cols <- per_year("prop_1")
+  prop_by_year <- !is.null(prop_cols) && n_year > 1
+  if (!prop_by_year) prop_cols <- intersect(c("prop_1", "prop_1[1]"), colnames(samp_mat))[1]
+  pulses <- lapply(seq_along(prop_cols), function(k) {
+    p1 <- samp_mat[, prop_cols[k]]
+    list(year = if (prop_by_year) years[k] else NA,
+         first = box(p1), second = box(1 - p1))
+  })
+
+  list(
+    years = as.list(years),
+    recruits = by_year(recruit_cols),
+    adults = by_year(adult_cols),
+    pulse_days = as.list(as.integer(pulse_days)),
+    pulses_by_year = prop_by_year,
+    pulses = pulses
+  )
+}

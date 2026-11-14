@@ -310,3 +310,14 @@ select { padding: 8px 27px 8px 10px; color: var(--ink); background: white; borde
 .optimization-chart .chart-mount { margin-top: 10px; }
 @media (max-width: 800px) { .optimization-charts { grid-template-columns: 1fr; } }
 .alternatives-charts { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+
+/* Step 4 "What to plot" and its views */
+.analysis-view-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 16px 20px; background: white; border: 1px solid var(--line); }
+.analysis-view-picker label { font-size: 13px; font-weight: 600; color: var(--ink); }
+.analysis-view-picker select { flex: 1 1 240px; max-width: 360px; padding: 9px 12px; color: var(--ink); background: white; border: 1px solid var(--line); font: inherit; font-size: 14px; }
+.analysis-view:not([hidden]) { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.analysis-view .chart-panel { margin-top: 0; }
+.analysis-size-controls:not([hidden]) { margin-top: 0; padding: 14px 20px; background: white; border: 1px solid var(--line); }
+.analysis-size-controls .analysis-time-control { flex: 1 1 280px; }
+.analysis-size-controls .analysis-time-control input[type="range"] { flex: 1; width: auto; min-width: 140px; }
+#analyze-time-label { min-width: 46px; color: var(--ink); }

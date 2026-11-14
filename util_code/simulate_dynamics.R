@@ -70,6 +70,11 @@ result <- summarize_dynamics(N_post, with_year_dim(CmyModel$C_T), model_inputs$n
                              model_inputs$occ_y, model_inputs$totalo,
                              model_inputs$x, years, biweek)
 result$overwinter <- summarize_overwinter(samp_mat, model_inputs$x, years)
+# recruits enter the population at the occasion after the one flagged in
+# recruit_intro1 / recruit_intro2 (see the model's N update)
+pulse_days <- biweek[c(which(model_inputs$constants$recruit_intro1 == 1),
+                       which(model_inputs$constants$recruit_intro2 == 1)) + 1]
+result$population <- summarize_population(samp_mat, years, pulse_days)
 
 tmp <- paste0(output_path, ".tmp")
 writeLines(jsonlite::toJSON(result, auto_unbox = TRUE, na = "null", digits = NA), tmp)
