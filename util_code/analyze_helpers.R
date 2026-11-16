@@ -116,8 +116,9 @@ summarize_overwinter <- function(samp_mat, x, years, ci = 0.95) {
 #   Adults: N_adult[y] in the multi-year model (adults surviving the winter
 #   in later years of a consecutive run); lambda_A[y] in the independent-years
 #   model; lambda_A in the one-year model.
-#   Pulse proportions: one pair per year when prop_1 is indexed by year
-#   (independent years), otherwise a single pair shared by all years.
+#   Pulse proportions: a single pair shared by all years (every model
+#   version estimates one prop_1); a pair per year if prop_1 is ever indexed
+#   by year.
 # `pulse_days` are the days of year the two pulses enter the population.
 summarize_population <- function(samp_mat, years, pulse_days) {
   years <- as.integer(years)

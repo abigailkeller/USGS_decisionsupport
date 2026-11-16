@@ -3,10 +3,11 @@ library(nimble)
 # Model for multiple years of data with no two consecutive years (e.g. 2011,
 # 2013 and 2015): no year can be projected from another, so every year is
 # fit as in the one-year model (model_code_oneyear.R), with its own adults,
-# recruits, recruitment timing, adult size distribution and catch rates.
-# Fitting them together in one model is equivalent to fitting the one-year
-# model to each year separately, but keeps one posterior for the rest of the
-# app. The forecast (N_optim) projects the last year through the one-year
+# recruits, adult size distribution and catch rates. Recruitment timing
+# (prop_1, the share of recruits in the first pulse) is shared by all years,
+# as in the multi-year model. Apart from that shared timing, this is
+# equivalent to fitting the one-year model to each year separately, and it
+# keeps one posterior for the rest of the app. The forecast (N_optim) projects the last year through the one-year
 # model's overwinter step (natural survival over the winter).
 
 # Write model code
@@ -22,6 +23,10 @@ model_code <- nimbleCode({
                                            S[t, 1:n_size])
   }
   
+  # recruitment timing: share of each year's recruits entering in the first
+  # pulse, shared by all years
+  prop_1 ~ dbeta(1, 1)
+
   # ---- population dynamics, each year on its own ----
   for (y in 1:n_year) {
     N[1, y, 1:n_size] <- get_init_adult(log_mu_A[y], sigma_A[y],
@@ -42,13 +47,12 @@ model_code <- nimbleCode({
                                         n_size)
     
     # spread recruits between pulses
-    R_1[y, 1:n_size] <- prop_1[y] * R[y, 1:n_size]
-    R_2[y, 1:n_size] <- (1 - prop_1[y]) * R[y, 1:n_size]
+    R_1[y, 1:n_size] <- prop_1 * R[y, 1:n_size]
+    R_2[y, 1:n_size] <- (1 - prop_1) * R[y, 1:n_size]
     
-    ## annual abundance of recruits and adults, and recruitment timing
+    ## annual abundance of recruits and adults
     lambda_R[y] ~ dunif(0, 100000)
     lambda_A[y] ~ dunif(0, 100000)
-    prop_1[y] ~ dbeta(1, 1)
     
     # adult size at the start of the season (lognormal mean and sd)
     # (estimated; priors from the earlier IPM fit)

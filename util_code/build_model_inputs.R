@@ -199,8 +199,9 @@ build_model_inputs <- function(data_dir) {
       out$b_o <- 1
     }
     if (model_type == "independent") {
-      # every year has its own parameters
-      for (nm in c("prop_1", "h_M_max", "h_F_max", "h_S_max", "log_mu_A",
+      # every year has its own parameters, except recruitment timing
+      # (prop_1), which is shared
+      for (nm in c("h_M_max", "h_F_max", "h_S_max", "log_mu_A",
                    "sigma_A")) {
         out[[nm]] <- rep(out[[nm]], n_year)
       }

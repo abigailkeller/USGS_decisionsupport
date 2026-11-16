@@ -235,7 +235,7 @@ function resetOptimization() {
   const button = document.querySelector('#optimize-run-button');
   if (ring) ring.classList.remove('is-done');
   document.querySelector('#optimize-run-title').textContent = 'Ready to optimize';
-  document.querySelector('#optimize-run-copy').textContent = 'Finds the trap schedule that minimizes the estimated abundance at the start of the next trapping season using no more than your trapping effort.';
+  document.querySelector('#optimize-run-copy').textContent = 'Finds the trap schedule that minimizes the estimated abundance at the start of the next trapping season.';
   document.querySelector('#optimize-run-bar').style.width = '0%';
   document.querySelector('#optimize-run-error').hidden = true;
   if (button) button.disabled = false;
@@ -421,6 +421,16 @@ document.querySelector('#homepage-learn-more-button')?.addEventListener('click',
   homepageLearnMoreDialog.showModal();
 });
 setupDismissableDialog(homepageLearnMoreDialog, document.querySelector('#homepage-learn-more-close'));
+
+// "Learn more" on the optimization step: Q&A about how the optimization works
+const optimizeLearnMoreDialog = document.querySelector('#optimize-learn-more-dialog');
+document.querySelector('#optimize-learn-more-button').addEventListener('click', () => optimizeLearnMoreDialog.showModal());
+setupDismissableDialog(optimizeLearnMoreDialog, document.querySelector('#optimize-learn-more-close'));
+
+// "Read more" on the upload step: what the catch and effort files should contain
+const uploadReadMoreDialog = document.querySelector('#upload-read-more-dialog');
+document.querySelector('#upload-read-more-button').addEventListener('click', () => uploadReadMoreDialog.showModal());
+setupDismissableDialog(uploadReadMoreDialog, document.querySelector('#upload-read-more-close'));
 
 const dynamicsLearnMoreDialog = document.querySelector('#dynamics-learn-more-dialog');
 document.querySelector('#dynamics-learn-more-button')?.addEventListener('click', () => {
@@ -1746,24 +1756,20 @@ function abundanceRows(info, optionIndexes) {
 
 function hideOptimizationResults() {
   document.querySelector('#optimization-result-panel').hidden = true;
+  document.querySelector('#scenario-save-panel').hidden = true;
 }
 
-// "This schedule sets 25 shrimp traps, using 100 of your 100 Fukui traps'
-// worth of effort."
-function showEffortSummary(info) {
+// text under "Optimization results" describing the two charts
+function showEffortSummary() {
   const el = document.querySelector('#optimization-effort-summary');
-  const placed = ['fukui', 'minnow', 'shrimp']
-    .filter((type) => info.traps && info.traps[type] > 0)
-    .map((type) => pluralTraps(info.traps[type], type === 'fukui' ? 'Fukui' : type));
-  if (!placed.length || !Number.isFinite(info.effortUsed)) { el.hidden = true; return; }
-  const list = placed.length > 1 ? `${placed.slice(0, -1).join(', ')} and ${placed[placed.length - 1]}` : placed[0];
-  el.innerHTML = `This schedule sets <strong>${list}</strong>, using ${info.effortUsed} of your ${info.budget} Fukui traps' worth of effort. `
+  el.textContent = 'The chart on the left shows the optimal allocation of traps over time. '
     + 'The chart on the right compares the expected crab abundance at the start of next season under this optimal trapping schedule with the expected abundance if no traps were set.';
   el.hidden = false;
 }
 
 function loadOptimizationResults() {
   document.querySelector('#optimization-result-panel').hidden = false;
+  document.querySelector('#scenario-save-panel').hidden = false;
   if (loadedResultsVersion === optimizationVersion) return;
   loadedResultsVersion = optimizationVersion;
   optimizationInfo = null;
@@ -1868,9 +1874,6 @@ function renderScenarios(scenarios) {
   const panel = document.querySelector('#scenarios-panel');
   panel.hidden = scenarios.length === 0;
   if (!scenarios.length) return;
-  document.querySelector('#scenarios-note').textContent = scenarios.length === 1
-    ? 'One scenario saved. Change the settings and run again, then save that run to compare it with this one.'
-    : `${scenarios.length} scenarios saved. Scenarios are kept until the population model is run again.`;
 
   const header = '<thead><tr><th scope="col">Scenario</th><th scope="col">Optimal trap schedule</th>'
     + '<th scope="col">Expected abundance next season</th><th scope="col">Reduction vs no trapping</th><th scope="col"><span class="visually-hidden">Remove</span></th></tr></thead>';
