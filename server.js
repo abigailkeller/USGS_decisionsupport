@@ -1024,6 +1024,25 @@ const server = http.createServer((req, res) => {
   res.end('Method not allowed');
 });
 
+// A run that was in progress when the server stopped (for example, a
+// restart after running out of memory) can't finish: its R process is gone,
+// but its progress file still says it's running, so the page would wait for
+// it forever. Mark such runs as failed when the server starts.
+function markInterruptedRuns() {
+  for (const progressPath of [PROGRESS_PATH, ANALYZE_PROGRESS_PATH, OPTIMIZE_PROGRESS_PATH]) {
+    let progress;
+    try { progress = JSON.parse(fs.readFileSync(progressPath, 'utf8')); } catch (error) { continue; }
+    if (!progress || progress.done) continue;
+    fs.writeFileSync(progressPath, JSON.stringify({
+      ...progress,
+      done: true,
+      error: 'This run was interrupted because the server restarted (for example, after running out of memory). Please run it again.',
+      updatedAt: new Date().toISOString(),
+    }));
+  }
+}
+markInterruptedRuns();
+
 server.listen(PORT, () => {
   console.log(`EGC Decision Support running at http://localhost:${PORT}`);
 });

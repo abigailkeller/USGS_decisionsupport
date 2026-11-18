@@ -47,15 +47,17 @@ spec:
                   name: egc-decision-support-chat
                   key: anthropic-api-key
                   optional: true
-          # A model fit runs 4 MCMC chains in parallel (one core each) and
-          # used about 3.6 GB in testing; analysis and optimization add more.
+          # A model fit runs 4 MCMC chains in parallel (one core each).
+          # Memory peaks while the 4 chains compile the model's C++ code at
+          # the same time: about 9.6 GB for 3 years of data. Going over the
+          # limit kills the container (OOMKilled) and the run is lost.
           resources:
             requests:
               cpu: "4"
-              memory: 8Gi
+              memory: 16Gi
             limits:
               cpu: "4"
-              memory: 8Gi
+              memory: 16Gi
           # Model fits run as separate R processes, so the web server keeps
           # answering these checks while they run.
           readinessProbe:
