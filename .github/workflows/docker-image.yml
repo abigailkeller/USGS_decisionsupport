@@ -1,0 +1,67 @@
+# Builds the app's Docker image and publishes it to the GitHub Container
+# Registry (ghcr.io/abigailkeller/usgs_decisionsupport), where Kubernetes on
+# the National Research Platform can pull it.
+#
+# - Push to main:       builds and publishes, tagged "latest" and the commit's
+#                       short SHA (e.g. sha-c51dae2). Deploy the SHA tag to pin
+#                       an exact version.
+# - Push a tag v1.2.3:  also tagged "1.2.3".
+# - Pull request:       builds only (checks the Dockerfile still works), nothing
+#                       is published.
+# - Manual run:         Actions tab -> "Build Docker image" -> Run workflow.
+name: Build Docker image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write # publish to ghcr.io with the workflow's own token
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # image name (lowercased automatically) and tags
+      - name: Work out image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+            type=semver,pattern={{version}}
+
+      # Installing the R packages is the slow part (several minutes); the
+      # GitHub Actions cache lets later builds reuse those layers when only
+      # the app code changed.
+      - name: Build and publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
