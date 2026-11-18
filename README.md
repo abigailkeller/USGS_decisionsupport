@@ -1,6 +1,6 @@
 # European Green Crab Decision Support Tool
 
-<img src="figures/homepage_plot.png" align="right" height="200" dpi="700"/>
+<img src="figures/homepage_plot.png" align="center" height="300" dpi="700"/>
 
 This repository contains code underlying the `European Green Crab Decision Support Tool`, built in collaboration with USGS Western Fisheries Research Center.
 
