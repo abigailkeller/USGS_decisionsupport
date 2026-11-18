@@ -8,7 +8,8 @@ metadata:
   labels:
     app: egc-decision-support
 spec:
-  storageClassName: ceph-rbd
+  # NRP's default block storage (the older ceph-rbd class doesn't provision)
+  storageClassName: rook-ceph-block
   accessModes:
     - ReadWriteOnce
   resources:
