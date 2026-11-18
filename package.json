@@ -1,0 +1,11 @@
+{
+  "name": "egc-decision-support",
+  "private": true,
+  "description": "EGC Decision Support web app (Node server; R does the modelling)",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.9.0"
+  }
+}

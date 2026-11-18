@@ -2,6 +2,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
+// chatbot for questions about results (see chat/chat.js for setup)
+const chat = require('./chat/chat.js');
 
 const ROOT = __dirname;
 const STAGING_DIR = path.join(ROOT, 'data', 'staging');
@@ -35,6 +37,11 @@ const MIME_TYPES = {
   '.css': 'text/css; charset=utf-8',
   '.png': 'image/png',
   '.svg': 'image/svg+xml',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
   '.csv': 'text/csv',
   '.json': 'application/json',
 };
@@ -89,10 +96,35 @@ function sendJson(res, status, payload) {
   res.end(body);
 }
 
+// Only the page's own files are served: the page, its script and styles,
+// and images in img/ and figures/. Everything else in the app folder -
+// uploaded data and results in data/, R code, server code, node_modules -
+// is never sent, so visitors can't download other people's data. Results
+// reach the page only through the api/ routes.
+const PUBLIC_FILES = new Set(['/index.html', '/script.js', '/styles.css']);
+const PUBLIC_DIRS = ['/img/', '/figures/'];
+const PUBLIC_IMAGE_TYPES = new Set(['.png', '.svg', '.jpg', '.jpeg', '.gif', '.webp', '.ico']);
+
+function isPublicPath(relativePath) {
+  if (PUBLIC_FILES.has(relativePath)) return true;
+  return PUBLIC_DIRS.some((dir) => relativePath.startsWith(dir))
+    && PUBLIC_IMAGE_TYPES.has(path.extname(relativePath).toLowerCase());
+}
+
 function serveStatic(req, res, pathname) {
-  const relativePath = pathname === '/' ? '/index.html' : pathname;
-  const filePath = path.normalize(path.join(ROOT, relativePath));
-  if (!filePath.startsWith(ROOT)) { res.writeHead(403); res.end('Forbidden'); return; }
+  let relativePath;
+  try {
+    relativePath = path.posix.normalize(decodeURIComponent(pathname === '/' ? '/index.html' : pathname));
+  } catch (error) {
+    relativePath = null; // malformed %-encoding
+  }
+  // not found (rather than forbidden), so the response doesn't reveal which
+  // other files exist
+  if (!relativePath || relativePath.includes('\0') || !isPublicPath(relativePath)) {
+    res.writeHead(404); res.end('Not found'); return;
+  }
+  const filePath = path.join(ROOT, relativePath);
+  if (!filePath.startsWith(ROOT + path.sep)) { res.writeHead(404); res.end('Not found'); return; }
   fs.readFile(filePath, (err, content) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
     const ext = path.extname(filePath);
@@ -981,6 +1013,9 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && pathname === '/api/optimize-traps/download') return handleOptimizeDownload(req, res);
   if (req.method === 'GET' && pathname === '/api/optimize-traps/result') return handleOptimizeResult(req, res);
   if (req.method === 'GET' && pathname === '/api/optimize-traps/options/download') return handleOptimizeOptionsDownload(req, res);
+  if (req.method === 'POST' && pathname === '/api/chat') return chat.handleChat(req, res);
+  if (req.method === 'GET' && pathname === '/api/chat/config') return chat.handleChatConfig(req, res);
+  if (req.method === 'GET' && pathname === '/api/chat/context') return chat.handleChatContext(req, res);
   if (req.method === 'GET' && pathname === '/api/scenarios') return handleListScenarios(req, res);
   if (req.method === 'POST' && pathname === '/api/scenarios') return handleSaveScenario(req, res);
   if (req.method === 'DELETE' && pathname.startsWith('/api/scenarios/')) return handleDeleteScenario(req, res, pathname.slice('/api/scenarios/'.length));
