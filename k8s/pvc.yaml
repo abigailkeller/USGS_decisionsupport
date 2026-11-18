@@ -1,0 +1,16 @@
+# Storage for the app's data/ folder (uploaded CSVs, prepared model inputs,
+# posterior samples, results and saved scenarios), so they survive the app
+# being restarted or updated. Deleting this claim deletes the data.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: egc-decision-support-data
+  labels:
+    app: egc-decision-support
+spec:
+  storageClassName: ceph-rbd
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

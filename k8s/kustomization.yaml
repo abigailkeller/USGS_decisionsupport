@@ -1,0 +1,25 @@
+# Deploys the EGC Decision Support app to the National Research Platform.
+#
+#   kubectl apply -k k8s/                  deploy, or update after editing
+#   kubectl get pods -l app=egc-decision-support
+#   kubectl logs deploy/egc-decision-support
+#
+# Resources go into the namespace selected in your kubectl context
+# (biodiversity-llm).
+#
+# To deploy a new version of the app: after GitHub Actions builds it, set
+# newTag below to the new image tag (shown on the package page on GitHub, e.g.
+# sha-1a2b3c4), then run `kubectl apply -k k8s/` again. Pinning a commit tag,
+# rather than "latest", means you always know which version is running.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+images:
+  - name: ghcr.io/abigailkeller/usgs_decisionsupport
+    newTag: sha-f3d7fcc

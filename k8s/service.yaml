@@ -1,0 +1,14 @@
+# Address for the app inside the cluster; the ingress sends web traffic here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: egc-decision-support
+  labels:
+    app: egc-decision-support
+spec:
+  selector:
+    app: egc-decision-support
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

@@ -1,0 +1,26 @@
+# Public web address: https://egc-decision-support.nrp-nautilus.io
+# NRP routes *.nrp-nautilus.io names to its HAProxy ingress and serves them
+# over HTTPS with its own certificate. Change the host name (in both places)
+# if you'd like a different address.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: egc-decision-support
+  labels:
+    app: egc-decision-support
+spec:
+  ingressClassName: haproxy
+  rules:
+    - host: egc-decision-support.nrp-nautilus.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: egc-decision-support
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - egc-decision-support.nrp-nautilus.io

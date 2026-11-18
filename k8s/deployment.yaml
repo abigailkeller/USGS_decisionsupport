@@ -1,0 +1,80 @@
+# The app: one copy of the container built by GitHub Actions.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: egc-decision-support
+  labels:
+    app: egc-decision-support
+spec:
+  # Exactly one copy: every visitor shares one data/ folder, and the server
+  # keeps track of running model fits in memory. Recreate (rather than a
+  # rolling update) stops the old copy before starting the new one, since the
+  # storage can only be attached to one copy at a time.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: egc-decision-support
+  template:
+    metadata:
+      labels:
+        app: egc-decision-support
+    spec:
+      containers:
+        - name: app
+          # the tag is set in kustomization.yaml
+          image: ghcr.io/abigailkeller/usgs_decisionsupport
+          imagePullPolicy: IfNotPresent
+          # The storage is mounted over data/, which hides the folders the
+          # Dockerfile creates there, so make sure they exist first.
+          command: ["sh", "-c", "mkdir -p data/staging data/model_data data/posterior_samples && exec node server.js"]
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: PORT
+              value: "8000"
+            # Chatbot (see chat/chat.js). It reads the Claude API key from
+            # the egc-decision-support-chat secret if that exists; without
+            # it the rest of the app works and the chatbot reports that it
+            # isn't set up.
+            - name: CHAT_PROVIDER
+              value: anthropic
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: egc-decision-support-chat
+                  key: anthropic-api-key
+                  optional: true
+          # A model fit runs 4 MCMC chains in parallel (one core each) and
+          # used about 3.6 GB in testing; analysis and optimization add more.
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          # Model fits run as separate R processes, so the web server keeps
+          # answering these checks while they run.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: egc-decision-support-data
