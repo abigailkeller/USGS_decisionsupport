@@ -7,8 +7,10 @@
 //      in script.js, plus the posterior-summary READMEs. Re-read when those
 //      files change, so it stays in sync with what users see.
 //   2. Results (changes with each run): compact tables built from the
-//      current results files - posterior summary, analysis summaries,
-//      optimization results and saved scenarios.
+//      user's results, which the browser sends with each question (each
+//      user's data lives in their own browser, not on the server) -
+//      posterior summary, analysis summaries, optimization results and
+//      saved scenarios.
 //
 // The model is swappable with environment variables:
 //   CHAT_PROVIDER   "anthropic" (Claude, default) or "ollama" (a model running
@@ -26,20 +28,13 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
-const POSTERIOR_DIR = path.join(ROOT, 'data', 'posterior_samples');
 const PATHS = {
   indexHtml: path.join(ROOT, 'index.html'),
   scriptJs: path.join(ROOT, 'script.js'),
   readmes: ['README_oneyear.txt', 'README_multiyear.txt', 'README_independentyears.txt']
     .map((name) => path.join(ROOT, 'util_code', name)),
-  posterior: path.join(POSTERIOR_DIR, 'twopulse.rds'),
-  summaryCsv: path.join(POSTERIOR_DIR, 'posterior_summary.csv'),
-  dynamics: path.join(POSTERIOR_DIR, 'simulated_dynamics.json'),
-  optimization: path.join(POSTERIOR_DIR, 'optimal_trap_schedule.json'),
-  scenarios: path.join(POSTERIOR_DIR, 'scenarios'),
 };
 
 const PROVIDER = (process.env.CHAT_PROVIDER || 'anthropic').toLowerCase();
@@ -126,32 +121,6 @@ const dayLabel = (jday) => {
   const date = new Date(Date.UTC(2023, 0, 1) + (jday - 1) * 86400000);
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 };
-const stale = (filePath) => {
-  const posterior = fileStamp(PATHS.posterior);
-  const file = fileStamp(filePath);
-  return posterior !== null && file !== null && file < posterior;
-};
-const STALE_NOTE = '(NOTE: these results were made before the latest model fit; the user should re-run this step.)';
-
-// the posterior summary CSV is written on demand; refresh it if it's
-// missing or older than the posterior samples
-function ensurePosteriorSummary() {
-  return new Promise((resolve) => {
-    if (fileStamp(PATHS.posterior) === null) return resolve(null);
-    if (fileStamp(PATHS.summaryCsv) !== null && !stale(PATHS.summaryCsv)) {
-      return resolve(fs.readFileSync(PATHS.summaryCsv, 'utf8'));
-    }
-    execFile('Rscript', ['util_code/create_posterior_summary.R', PATHS.posterior, PATHS.summaryCsv],
-      { cwd: ROOT, maxBuffer: 20 * 1024 * 1024 }, (error) => {
-        resolve(error || fileStamp(PATHS.summaryCsv) === null ? null : fs.readFileSync(PATHS.summaryCsv, 'utf8'));
-      });
-  });
-}
-
-function readJson(filePath) {
-  try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (error) { return null; }
-}
-
 function summarizeDynamics(d) {
   const lines = [`Years analysed: ${d.years.join(', ')}`];
   // total abundance through each season
@@ -211,48 +180,48 @@ function summarizeOptimization(r) {
   return lines.join('\n');
 }
 
-function summarizeScenarios() {
-  if (!fs.existsSync(PATHS.scenarios)) return null;
-  const posterior = fileStamp(PATHS.posterior);
-  const rows = fs.readdirSync(PATHS.scenarios).filter((f) => f.endsWith('.json'))
-    .map((f) => readJson(path.join(PATHS.scenarios, f)))
-    .filter((s) => s && s.posteriorStamp === posterior)
-    .sort((a, b) => a.savedAt - b.savedAt)
-    .map((s) => {
-      const best = s.result.options?.[0];
-      const abundance = best ? `${round(best.expected_abundance, 1)} (95% CrI ${round(best.abundance_95[0])}-${round(best.abundance_95[1])}), reduction vs no trapping ${round(100 * best.reduction_vs_no_trapping, 1)}%` : round(s.result.objective_value, 1);
-      return `"${s.name}": effort ${s.result.budget}; schedule ${describeSchedule(s.result.schedule, s.result.occasions)}; expected abundance ${abundance}.`;
-    });
+// saved scenarios as kept by the page (see scenarioFromOptimization in
+// script.js)
+function summarizeScenarios(scenarios) {
+  const rows = (scenarios || []).filter((s) => s && s.schedule && Array.isArray(s.occasions)).map((s) => {
+    const placed = Object.entries(s.schedule).map(([type, counts]) => {
+      const dates = counts.map((n, i) => [n, s.occasions[i]]).filter(([n]) => n > 0).map(([n, date]) => `${n} on ${date}`);
+      return dates.length ? `${type}: ${dates.join(', ')}` : null;
+    }).filter(Boolean).join('; ') || 'no traps';
+    const interval = Array.isArray(s.abundance95) ? ` (95% CrI ${round(s.abundance95[0])}-${round(s.abundance95[1])})` : '';
+    const reduction = Number.isFinite(s.reduction) ? `, reduction vs no trapping ${round(100 * s.reduction, 1)}%` : '';
+    return `"${String(s.name).slice(0, 80)}": effort ${s.budget}; schedule ${placed}; expected abundance ${round(s.expectedAbundance, 1)}${interval}${reduction}.`;
+  });
   return rows.length ? rows.join('\n') : null;
 }
 
-async function buildResults() {
+// `results` comes from the browser: { posteriorSummaryCsv, analysis,
+// optimization, scenarios }, any of which may be missing
+function buildResults(results) {
+  const r = results && typeof results === 'object' ? results : {};
   const sections = [];
-  if (fileStamp(PATHS.posterior) === null) {
+  if (typeof r.posteriorSummaryCsv !== 'string' || !r.posteriorSummaryCsv.trim()) {
     return '# User results\nThe population model has not been run yet, so there are no results. (Step 4, "Run population model".)';
   }
-  const summary = await ensurePosteriorSummary();
-  sections.push(`# Posterior summary (parameter estimates; mean, sd, 2.5% and 97.5% quantiles)\n${summary ? summary.trim() : 'Not available.'}`);
-
-  const dynamics = readJson(PATHS.dynamics);
-  sections.push(dynamics
-    ? `# Analysis results (step 4, "Analyze results") ${stale(PATHS.dynamics) ? STALE_NOTE : ''}\n${summarizeDynamics(dynamics)}`
+  sections.push(`# Posterior summary (parameter estimates; mean, sd, 2.5% and 97.5% quantiles)\n${r.posteriorSummaryCsv.trim().slice(0, 20000)}`);
+  // the summaries below read nested fields; a malformed upload shouldn't
+  // break the whole answer
+  const safely = (fn, label) => { try { return fn(); } catch (error) { return `${label}: could not be read.`; } };
+  sections.push(r.analysis
+    ? `# Analysis results (step 4, "Analyze results")\n${safely(() => summarizeDynamics(r.analysis), 'Analysis results')}`
     : '# Analysis results\nNot run yet (step 4, "Analyze results").');
-
-  const optimization = readJson(PATHS.optimization);
-  sections.push(optimization
-    ? `# Optimization results (step 6) ${stale(PATHS.optimization) ? STALE_NOTE : ''}\n${summarizeOptimization(optimization)}`
+  sections.push(r.optimization
+    ? `# Optimization results (step 6)\n${safely(() => summarizeOptimization(r.optimization), 'Optimization results')}`
     : '# Optimization results\nNot run yet (step 6, "Run optimization").');
-
-  const scenarios = summarizeScenarios();
+  const scenarios = safely(() => summarizeScenarios(r.scenarios), 'Saved scenarios');
   if (scenarios) sections.push(`# Saved scenarios (for comparing optimization settings)\n${scenarios}`);
   return sections.join('\n\n');
 }
 
-async function buildContext() {
+function buildContext(results) {
   return {
     stable: `${INSTRUCTIONS}\n\n<app_knowledge>\n${buildKnowledge()}\n</app_knowledge>`,
-    results: `<user_results>\n${await buildResults()}\n</user_results>`,
+    results: `<user_results>\n${buildResults(results)}\n</user_results>`,
   };
 }
 
@@ -375,7 +344,7 @@ function readBody(req) {
     let raw = '';
     req.on('data', (chunk) => {
       raw += chunk;
-      if (raw.length > 200000) { reject(new ChatError(413, 'Request too large.')); req.destroy(); }
+      if (raw.length > 2000000) { reject(new ChatError(413, 'Request too large.')); req.destroy(); }
     });
     req.on('end', () => resolve(raw));
     req.on('error', reject);
@@ -387,8 +356,10 @@ function sendError(res, status, message) {
   res.end(JSON.stringify({ error: message }));
 }
 
-// POST /api/chat  { messages: [{ role: "user" | "assistant", content }] }
-// Streams the answer back as plain text.
+// POST /api/chat  { messages: [{ role: "user" | "assistant", content }],
+//                  results: { posteriorSummaryCsv, analysis, optimization, scenarios } }
+// Streams the answer back as plain text. The page sends its stored results
+// with each question (see buildResults).
 async function handleChat(req, res) {
   const streamAnswer = PROVIDERS[PROVIDER];
   if (!streamAnswer) return sendError(res, 500, `Unknown CHAT_PROVIDER "${PROVIDER}". Use "anthropic" or "ollama".`);
@@ -396,19 +367,21 @@ async function handleChat(req, res) {
     return sendError(res, 429, 'Too many questions this hour. Please try again later.');
   }
   let messages;
+  let results;
   try {
     let payload;
     try { payload = JSON.parse(await readBody(req)); } catch (error) {
       throw error instanceof ChatError ? error : new ChatError(400, 'Request body must be JSON.');
     }
     messages = validateMessages(payload);
+    results = payload.results;
   } catch (error) {
     return sendError(res, error.status || 400, error.message);
   }
 
   let started = false;
   try {
-    const context = await buildContext();
+    const context = buildContext(results);
     for await (const text of streamAnswer(context, messages)) {
       if (!started) {
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Chat-Model': MODEL });
@@ -444,9 +417,12 @@ function handleChatConfig(req, res) {
   res.end(JSON.stringify({ provider: PROVIDER, model: MODEL || null }));
 }
 
-// GET /api/chat/context - exactly what the bot is given, for checking
+// POST /api/chat/context { results } - exactly what the bot would be given
+// for these results, for checking
 async function handleChatContext(req, res) {
-  const context = await buildContext();
+  let payload = {};
+  try { payload = JSON.parse((await readBody(req)) || '{}'); } catch (error) { return sendError(res, 400, 'Request body must be JSON.'); }
+  const context = buildContext(payload.results);
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(`${context.stable}\n\n${context.results}\n`);
 }

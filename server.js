@@ -1,30 +1,20 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { execFile, spawn } = require('child_process');
 // chatbot for questions about results (see chat/chat.js for setup)
 const chat = require('./chat/chat.js');
+// each user's model fits, analyses and optimizations run as private jobs
+const jobsLib = require('./jobs.js');
 
+const { JobError } = jobsLib;
 const ROOT = __dirname;
-const STAGING_DIR = path.join(ROOT, 'data', 'staging');
-const MODEL_DATA_DIR = path.join(ROOT, 'data', 'model_data');
-const POSTERIOR_DIR = path.join(ROOT, 'data', 'posterior_samples');
-const PROGRESS_PATH = path.join(POSTERIOR_DIR, 'progress.json');
-const OUTPUT_PATH = path.join(POSTERIOR_DIR, 'twopulse.rds');
-const ANALYZE_PROGRESS_PATH = path.join(POSTERIOR_DIR, 'analyze_progress.json');
-const ANALYZE_OUTPUT_PATH = path.join(POSTERIOR_DIR, 'simulated_dynamics.json');
-const SUMMARY_CSV_PATH = path.join(POSTERIOR_DIR, 'posterior_summary.csv');
 // posterior summary READMEs, one per model version
 const README_PATHS = {
   oneyear: path.join(ROOT, 'util_code', 'README_oneyear.txt'),
   multiyear: path.join(ROOT, 'util_code', 'README_multiyear.txt'),
   independent: path.join(ROOT, 'util_code', 'README_independentyears.txt'),
 };
-const OPTIMIZE_PROGRESS_PATH = path.join(POSTERIOR_DIR, 'optimize_progress.json');
-const OPTIMIZE_OUTPUT_PATH = path.join(POSTERIOR_DIR, 'optimal_trap_schedule.json');
 const OPTIMIZE_N_DRAW = 100;
-// saved optimization scenarios, one JSON file each, for comparing settings
-const SCENARIOS_DIR = path.join(POSTERIOR_DIR, 'scenarios');
 // fresh posterior draws used to score the candidate schedules
 const OPTIMIZE_N_DRAW_SCORE = 500;
 const PORT = process.env.PORT || 8000;
@@ -45,18 +35,6 @@ const MIME_TYPES = {
   '.csv': 'text/csv',
   '.json': 'application/json',
 };
-
-let modelRunInProgress = false;
-let analysisInProgress = false;
-let optimizeInProgress = false;
-// The running optimization child process, if any, so it can be stopped when
-// its inputs (data or objective) change
-let optimizeChild = null;
-// The run-model child process, if it's still alive and waiting (after
-// finishing its MCMC run) for an "ANALYZE" command on its stdin. Reusing it
-// skips recompiling the model for the analyze-results step. Always null
-// unless a run-model process is specifically parked waiting for reuse.
-let modelChild = null;
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -133,100 +111,226 @@ function serveStatic(req, res, pathname) {
   });
 }
 
-function handlePrepareData(req, res) {
-  readBody(req).then((raw) => {
-    let payload;
-    try {
-      payload = JSON.parse(raw);
-    } catch (error) {
-      return sendJson(res, 400, { error: 'Invalid JSON body.' });
-    }
-    const { catchRows, effortRows } = payload;
-    if (!Array.isArray(catchRows) || !catchRows.length || !Array.isArray(effortRows) || !effortRows.length) {
-      return sendJson(res, 400, { error: 'Both catchRows and effortRows are required and must be non-empty.' });
-    }
+// ---- jobs: model fit, analysis and optimization ----
+// The browser sends everything a step needs and collects the outputs when
+// the job is done (see jobs.js); nothing is kept on the server between
+// steps, so users can't see or overwrite each other's data.
 
-    const catchPath = path.join(STAGING_DIR, 'catch.csv');
-    const effortPath = path.join(STAGING_DIR, 'effort.csv');
+// fit: catch/effort rows -> model inputs, posterior samples and posterior
+// summary
+function startFitJob(payload) {
+  const { catchRows, effortRows } = payload;
+  if (!Array.isArray(catchRows) || !catchRows.length || !Array.isArray(effortRows) || !effortRows.length) {
+    throw new JobError('Both catchRows and effortRows are required and must be non-empty.');
+  }
+  // 'auto' lets run_model.R pick by number of years (20,000 multi-year,
+  // 5,000 single year)
+  const iter = Number.isFinite(payload.iter) ? Math.max(1, Math.round(payload.iter)) : 'auto';
+  const thin = Number.isFinite(payload.thin) ? Math.max(1, Math.round(payload.thin)) : 10;
+  const nchains = 4;
+
+  return jobsLib.createJob('fit', async (job) => {
+    const catchPath = path.join(job.dir, 'catch.csv');
+    const effortPath = path.join(job.dir, 'effort.csv');
     writeCsv(catchPath, ['Date', 'Trap_Type', 'Trap_Number', 'Size_mm'], catchRows);
     writeCsv(effortPath, ['Date', 'Trap_Type', 'Trap_Number'], effortRows);
 
-    execFile('Rscript', ['util_code/prep_model_data.R', catchPath, effortPath, MODEL_DATA_DIR, EXPORT_DATE_FORMAT, EXPORT_DATE_FORMAT], { cwd: ROOT, maxBuffer: 20 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) {
-        return sendJson(res, 500, { error: 'Data preparation failed.', details: stderr || stdout || error.message });
-      }
-      sendJson(res, 200, { ok: true });
-    });
+    const modelDataDir = path.join(job.dir, 'model_data');
+    job.progress = { phase: 'preparing', message: 'Building model inputs from your catch and effort data...' };
+    try {
+      await jobsLib.runR(job, ['util_code/prep_model_data.R', catchPath, effortPath, modelDataDir, EXPORT_DATE_FORMAT, EXPORT_DATE_FORMAT]);
+    } catch (error) {
+      throw new JobError(`Data preparation failed. ${error.message}`);
+    }
+
+    const posteriorPath = path.join(job.dir, 'twopulse.rds');
+    const progressPath = path.join(job.dir, 'progress.json');
+    const child = await jobsLib.runFitProcess(job,
+      ['util_code/run_model.R', modelDataDir, posteriorPath, progressPath, String(iter), String(thin), String(nchains)],
+      progressPath);
+    // the process stays alive with its compiled model so "Analyze results"
+    // can reuse it (see jobs.js for when it's released)
+    if (child.exitCode === null) {
+      jobsLib.parked.set(job.id, { child, parkedAt: Date.now() });
+      child.on('exit', () => {
+        if (jobsLib.parked.get(job.id)?.child === child) jobsLib.parked.delete(job.id);
+      });
+    }
+
+    job.progress = { ...job.progress, phase: 'saving', message: 'Summarizing the posterior samples...' };
+    const summaryCsvPath = path.join(job.dir, 'posterior_summary.csv');
+    // prints which model version it summarized, to pick the README
+    const modelType = (await jobsLib.runR(job, ['util_code/create_posterior_summary.R', posteriorPath, summaryCsvPath])).trim();
+    const summaryCsv = fs.readFileSync(summaryCsvPath, 'utf8');
+    const summaryZip = buildZip([
+      { name: 'posterior_summary.csv', data: Buffer.from(summaryCsv) },
+      { name: 'README.txt', data: fs.readFileSync(README_PATHS[modelType] || README_PATHS.multiyear) },
+    ]);
+    return {
+      fitId: job.id,
+      modelType,
+      modelData: jobsLib.readFilesBase64(modelDataDir),
+      posterior: fs.readFileSync(posteriorPath).toString('base64'),
+      posteriorSummaryCsv: summaryCsv,
+      posteriorSummaryZip: summaryZip.toString('base64'),
+    };
+  });
+}
+
+// writes the model inputs and posterior sent by the browser into a job
+function writeFitInputs(job, payload) {
+  const modelDataDir = path.join(job.dir, 'model_data');
+  jobsLib.writeFiles(modelDataDir, payload.modelData);
+  const posteriorPath = path.join(job.dir, 'twopulse.rds');
+  fs.writeFileSync(posteriorPath, Buffer.from(payload.posterior, 'base64'));
+  return { modelDataDir, posteriorPath };
+}
+
+function requireFitInputs(payload) {
+  if (!payload.modelData || typeof payload.modelData !== 'object' || !Object.keys(payload.modelData).length) {
+    throw new JobError('Missing model inputs. Run the population model again.');
+  }
+  jobsLib.requireBase64(payload.posterior, 'posterior samples');
+}
+
+// analyze: model inputs + posterior -> simulated dynamics. Reuses the fit's
+// still-running process (and its compiled model) when it's available.
+function startAnalyzeJob(payload) {
+  requireFitInputs(payload);
+  const nDraw = Number.isFinite(payload.nDraw) ? Math.max(1, Math.round(payload.nDraw)) : 200;
+  const reuseFitId = typeof payload.fitId === 'string' && jobsLib.parked.has(payload.fitId) ? payload.fitId : null;
+
+  return jobsLib.createJob('analyze', async (job) => {
+    const { modelDataDir, posteriorPath } = writeFitInputs(job, payload);
+    const outputPath = path.join(job.dir, 'simulated_dynamics.json');
+    const progressPath = path.join(job.dir, 'analyze_progress.json');
+    const entry = reuseFitId && jobsLib.parked.get(reuseFitId);
+    if (entry && entry.child.exitCode === null) {
+      jobsLib.parked.delete(reuseFitId);
+      job.progress = { phase: 'preparing', message: 'Reusing the already-compiled model from the population model run.' };
+      await jobsLib.runReusedAnalysis(job, entry.child,
+        `ANALYZE\t${posteriorPath}\t${outputPath}\t${progressPath}\t${nDraw}\n`, progressPath);
+    } else {
+      job.progress = { phase: 'compiling', message: 'Building and compiling the model. This can take a minute.' };
+      await jobsLib.runR(job, ['util_code/simulate_dynamics.R', modelDataDir, posteriorPath, outputPath, progressPath, String(nDraw)], { progressPath });
+    }
+    return { analysis: JSON.parse(fs.readFileSync(outputPath, 'utf8')) };
+  }, { reuseFitId });
+}
+
+// optimization settings from the browser, checked
+function parseOptimizeSettings(payload) {
+  const budget = Number(payload.budget);
+  const costFukui = Number(payload.costFukui);
+  const costShrimp = Number(payload.costShrimp);
+  const costMinnow = Number(payload.costMinnow);
+  if (!Number.isFinite(budget) || budget < 1) {
+    throw new JobError("Trapping effort must be at least 1 Fukui trap's worth.");
+  }
+  // effort per trap is a multiple of a Fukui trap's (the reference), so 1
+  // is the floor for every type
+  for (const [label, cost] of [['Fukui', costFukui], ['Shrimp', costShrimp], ['Minnow', costMinnow]]) {
+    if (!Number.isFinite(cost) || cost < 1) {
+      throw new JobError(`${label} trap effort must be at least 1 (a Fukui trap's worth).`);
+    }
+  }
+  // constraints: which trap types can be set (at least one), and the most
+  // effort (Fukui traps' worth) at any one biweek, from budget / number of
+  // biweeks up to the whole budget (no limit)
+  const TRAP_TYPES = ['fukui', 'shrimp', 'minnow'];
+  const allowedTypes = Array.isArray(payload.allowedTypes)
+    ? TRAP_TYPES.filter((type) => payload.allowedTypes.includes(type))
+    : TRAP_TYPES;
+  if (!allowedTypes.length) throw new JobError('Choose at least one available trap type.');
+  let maxPerBiweek = Number(payload.maxPerBiweek);
+  if (!Number.isFinite(maxPerBiweek) || maxPerBiweek > budget) maxPerBiweek = budget;
+  if (maxPerBiweek < 1) throw new JobError("Maximum traps per biweek must be at least 1 Fukui trap's worth.");
+  return { budget, costFukui, costShrimp, costMinnow, allowedTypes, maxPerBiweek };
+}
+
+// optimize: model inputs + posterior + settings -> trap schedule, the
+// summary the results page needs, and the two downloads
+function startOptimizeJob(payload) {
+  requireFitInputs(payload);
+  const settings = parseOptimizeSettings(payload.settings || {});
+
+  return jobsLib.createJob('optimize', async (job) => {
+    const { modelDataDir, posteriorPath } = writeFitInputs(job, payload);
+    const outputPath = path.join(job.dir, 'optimal_trap_schedule.json');
+    const progressPath = path.join(job.dir, 'optimize_progress.json');
+    job.progress = { phase: 'preparing', message: 'Loading model inputs and posterior samples...' };
+    await jobsLib.runR(job, [
+      'util_code/optimize_traps.R',
+      modelDataDir,
+      posteriorPath,
+      outputPath,
+      progressPath,
+      String(settings.budget),
+      String(settings.costFukui),
+      String(settings.costShrimp),
+      String(settings.costMinnow),
+      String(OPTIMIZE_N_DRAW),
+      String(OPTIMIZE_N_DRAW_SCORE),
+      settings.allowedTypes.join(','),
+      String(settings.maxPerBiweek),
+    ], { progressPath });
+    const result = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+    const zips = optimizationZips(result);
+    return {
+      result,
+      info: optimizationInfo(result),
+      summaryZip: zips.summaryZip.toString('base64'),
+      optionsZip: zips.optionsZip ? zips.optionsZip.toString('base64') : null,
+    };
+  });
+}
+
+const JOB_STARTERS = { fit: startFitJob, analyze: startAnalyzeJob, optimize: startOptimizeJob };
+
+// POST /api/jobs { type: "fit" | "analyze" | "optimize", ...inputs }
+function handleCreateJob(req, res) {
+  readBody(req).then((raw) => {
+    let payload;
+    try { payload = raw ? JSON.parse(raw) : {}; } catch (error) { return sendJson(res, 400, { error: 'Invalid JSON body.' }); }
+    const start = JOB_STARTERS[payload.type];
+    if (!start) return sendJson(res, 400, { error: 'Unknown job type.' });
+    try {
+      const job = start(payload);
+      sendJson(res, 200, { id: job.id });
+    } catch (error) {
+      sendJson(res, error instanceof JobError ? 400 : 500, { error: error.message });
+    }
   }).catch((error) => sendJson(res, 400, { error: error.message }));
 }
 
-function handleRunModel(req, res) {
-  if (modelRunInProgress) {
-    return sendJson(res, 409, { error: 'A model run is already in progress.' });
-  }
-  readBody(req).then((raw) => {
-    let payload = {};
-    try {
-      payload = raw ? JSON.parse(raw) : {};
-    } catch (error) {
-      payload = {};
-    }
-    // 'auto' lets run_model.R pick by number of years (20,000 multi-year,
-    // 5,000 single year)
-    const iter = Number.isFinite(payload.iter) ? Math.max(1, Math.round(payload.iter)) : 'auto';
-    const thin = Number.isFinite(payload.thin) ? Math.max(1, Math.round(payload.thin)) : 10;
-    const nchains = 4;
+const INTERRUPTED = 'This run was interrupted because the server restarted (for example, after running out of memory) or it was left unattended. Please run it again.';
 
-    // a prior run's process may still be parked waiting for an ANALYZE
-    // command that never came; starting a new run supersedes it
-    if (modelChild) { modelChild.kill(); modelChild = null; }
-
-    if (fs.existsSync(PROGRESS_PATH)) fs.rmSync(PROGRESS_PATH, { force: true });
-    modelRunInProgress = true;
-
-    const child = spawn('Rscript', [
-      'util_code/run_model.R',
-      MODEL_DATA_DIR,
-      OUTPUT_PATH,
-      PROGRESS_PATH,
-      String(iter),
-      String(thin),
-      String(nchains),
-    ], { cwd: ROOT, stdio: ['pipe', 'ignore', 'ignore'] });
-    child.stdin.on('error', () => {}); // ignore EPIPE if it exits before we write to it
-    modelChild = child;
-    child.on('exit', () => {
-      modelRunInProgress = false;
-      if (modelChild === child) modelChild = null;
-    });
-
-    sendJson(res, 200, { started: true });
-  }).catch((error) => {
-    modelRunInProgress = false;
-    sendJson(res, 400, { error: error.message });
-  });
+// GET /api/jobs/:id - progress (polled by the page)
+function handleJobStatus(req, res, id) {
+  const job = jobsLib.jobs.get(id);
+  if (!job) return sendJson(res, 404, { error: INTERRUPTED, done: true });
+  job.lastSeen = Date.now();
+  sendJson(res, 200, jobsLib.jobStatus(job));
 }
 
-function handleProgress(req, res) {
-  fs.readFile(PROGRESS_PATH, 'utf8', (err, content) => {
-    if (err) return sendJson(res, 200, { phase: 'idle', completed: 0, total: 0, done: false, error: null });
-    try {
-      sendJson(res, 200, JSON.parse(content));
-    } catch (error) {
-      sendJson(res, 200, { phase: 'idle', completed: 0, total: 0, done: false, error: null });
-    }
-  });
+// GET /api/jobs/:id/result - the outputs, once; the job's files are then
+// deleted from the server
+function handleJobResult(req, res, id) {
+  const job = jobsLib.jobs.get(id);
+  if (!job) return sendJson(res, 404, { error: INTERRUPTED });
+  if (job.status === 'failed') return sendJson(res, 409, { error: job.error });
+  if (job.status !== 'done') return sendJson(res, 409, { error: 'This run has not finished yet.' });
+  sendJson(res, 200, job.result);
+  jobsLib.removeJob(job);
 }
 
-function handleDownload(req, res) {
-  fs.access(OUTPUT_PATH, fs.constants.R_OK, (err) => {
-    if (err) { res.writeHead(404); res.end('No posterior samples file found. Run the model first.'); return; }
-    res.writeHead(200, {
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': `attachment; filename="${path.basename(OUTPUT_PATH)}"`,
-    });
-    fs.createReadStream(OUTPUT_PATH).pipe(res);
-  });
+// DELETE /api/jobs/:id - stop a job (e.g. the data or settings changed) and
+// release the fit's kept-alive process
+function handleCancelJob(req, res, id) {
+  const job = jobsLib.jobs.get(id);
+  if (job) jobsLib.cancelJob(job);
+  jobsLib.releaseFit(id);
+  sendJson(res, 200, { cancelled: Boolean(job) });
 }
 
 // ---- minimal ZIP writer (STORE method, no compression) ----
@@ -312,224 +416,6 @@ function buildZip(files) {
   return Buffer.concat([...localParts, centralDir, end]);
 }
 
-function handlePosteriorSummaryDownload(req, res) {
-  if (!fs.existsSync(OUTPUT_PATH)) {
-    res.writeHead(400);
-    res.end('No posterior samples found. Run the population model first.');
-    return;
-  }
-  execFile('Rscript', ['util_code/create_posterior_summary.R', OUTPUT_PATH, SUMMARY_CSV_PATH], { cwd: ROOT, maxBuffer: 20 * 1024 * 1024 }, (error, stdout, stderr) => {
-    if (error) {
-      res.writeHead(500);
-      res.end(`Could not create the posterior summary.\n${stderr || stdout || error.message}`);
-      return;
-    }
-    try {
-      const files = [
-        { name: 'posterior_summary.csv', data: fs.readFileSync(SUMMARY_CSV_PATH) },
-        // create_posterior_summary.R prints which model version it summarized
-        { name: 'README.txt', data: fs.readFileSync(README_PATHS[stdout.trim()] || README_PATHS.multiyear) },
-      ];
-      const zipBuffer = buildZip(files);
-      res.writeHead(200, {
-        'Content-Type': 'application/zip',
-        'Content-Disposition': 'attachment; filename="posterior_summary.zip"',
-      });
-      res.end(zipBuffer);
-    } catch (zipError) {
-      res.writeHead(500);
-      res.end(`Could not bundle the posterior summary download.\n${zipError.message}`);
-    }
-  });
-}
-
-function canReuseCompiledModel() {
-  if (!modelChild) return false;
-  try {
-    const progress = JSON.parse(fs.readFileSync(PROGRESS_PATH, 'utf8'));
-    return progress.phase === 'done' && !progress.error;
-  } catch (error) {
-    return false;
-  }
-}
-
-function handleAnalyzeResults(req, res) {
-  if (analysisInProgress) {
-    return sendJson(res, 409, { error: 'An analysis run is already in progress.' });
-  }
-  if (!fs.existsSync(OUTPUT_PATH)) {
-    return sendJson(res, 400, { error: 'No posterior samples found. Run the population model first.' });
-  }
-  readBody(req).then((raw) => {
-    let payload = {};
-    try {
-      payload = raw ? JSON.parse(raw) : {};
-    } catch (error) {
-      payload = {};
-    }
-    const nDraw = Number.isFinite(payload.nDraw) ? Math.max(1, Math.round(payload.nDraw)) : 200;
-
-    if (fs.existsSync(ANALYZE_PROGRESS_PATH)) fs.rmSync(ANALYZE_PROGRESS_PATH, { force: true });
-    analysisInProgress = true;
-
-    if (canReuseCompiledModel()) {
-      // Hand this one request to the still-running run-model process, which
-      // already has a compiled model sitting in memory -- skips recompiling
-      // entirely. It exits on its own once this request is fulfilled.
-      const reusedChild = modelChild;
-      modelChild = null;
-      reusedChild.on('exit', () => { analysisInProgress = false; });
-      reusedChild.stdin.write(`ANALYZE\t${OUTPUT_PATH}\t${ANALYZE_OUTPUT_PATH}\t${ANALYZE_PROGRESS_PATH}\t${nDraw}\n`);
-      return sendJson(res, 200, { started: true, reused: true });
-    }
-
-    const child = spawn('Rscript', [
-      'util_code/simulate_dynamics.R',
-      MODEL_DATA_DIR,
-      OUTPUT_PATH,
-      ANALYZE_OUTPUT_PATH,
-      ANALYZE_PROGRESS_PATH,
-      String(nDraw),
-    ], { cwd: ROOT, detached: true, stdio: 'ignore' });
-    child.unref();
-    child.on('exit', () => { analysisInProgress = false; });
-
-    sendJson(res, 200, { started: true, reused: false });
-  }).catch((error) => {
-    analysisInProgress = false;
-    sendJson(res, 400, { error: error.message });
-  });
-}
-
-function handleAnalyzeProgress(req, res) {
-  fs.readFile(ANALYZE_PROGRESS_PATH, 'utf8', (err, content) => {
-    if (err) return sendJson(res, 200, { phase: 'idle', completed: 0, total: 0, done: false, error: null });
-    try {
-      sendJson(res, 200, JSON.parse(content));
-    } catch (error) {
-      sendJson(res, 200, { phase: 'idle', completed: 0, total: 0, done: false, error: null });
-    }
-  });
-}
-
-function handleAnalyzeData(req, res) {
-  fs.readFile(ANALYZE_OUTPUT_PATH, 'utf8', (err, content) => {
-    if (err) { res.writeHead(404); res.end('No analysis results found. Run the analysis first.'); return; }
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(content);
-  });
-}
-
-function handleReleaseModel(req, res) {
-  const released = Boolean(modelChild);
-  if (modelChild) { modelChild.kill(); modelChild = null; }
-  sendJson(res, 200, { released });
-}
-
-// Stops any optimization run and discards its results, used when the data
-// or the objective changes so an out-of-date schedule can't be downloaded
-function handleReleaseOptimize(req, res) {
-  const released = Boolean(optimizeChild);
-  if (optimizeChild) {
-    // detached, so it leads its own process group
-    try { process.kill(-optimizeChild.pid); } catch (error) { optimizeChild.kill(); }
-    optimizeChild = null;
-  }
-  optimizeInProgress = false;
-  fs.rmSync(OPTIMIZE_OUTPUT_PATH, { force: true });
-  fs.rmSync(OPTIMIZE_PROGRESS_PATH, { force: true });
-  sendJson(res, 200, { released });
-}
-
-function handleOptimizeTraps(req, res) {
-  if (optimizeInProgress) {
-    return sendJson(res, 409, { error: 'An optimization run is already in progress.' });
-  }
-  if (!fs.existsSync(OUTPUT_PATH)) {
-    return sendJson(res, 400, { error: 'No posterior samples found. Run the population model first.' });
-  }
-  readBody(req).then((raw) => {
-    let payload = {};
-    try {
-      payload = raw ? JSON.parse(raw) : {};
-    } catch (error) {
-      payload = {};
-    }
-    const budget = Number(payload.budget);
-    const costFukui = Number(payload.costFukui);
-    const costShrimp = Number(payload.costShrimp);
-    const costMinnow = Number(payload.costMinnow);
-    if (!Number.isFinite(budget) || budget < 1) {
-      return sendJson(res, 400, { error: "Trapping effort must be at least 1 Fukui trap's worth." });
-    }
-    // effort per trap is a multiple of a Fukui trap's (the reference), so 1
-    // is the floor for every type
-    for (const [label, cost] of [['Fukui', costFukui], ['Shrimp', costShrimp], ['Minnow', costMinnow]]) {
-      if (!Number.isFinite(cost) || cost < 1) {
-        return sendJson(res, 400, { error: `${label} trap effort must be at least 1 (a Fukui trap's worth).` });
-      }
-    }
-    // constraints: which trap types can be set (at least one), and the most
-    // effort (Fukui traps' worth) at any one biweek, from budget / number of
-    // biweeks up to the whole budget (no limit)
-    const TRAP_TYPES = ['fukui', 'shrimp', 'minnow'];
-    const allowedTypes = Array.isArray(payload.allowedTypes)
-      ? TRAP_TYPES.filter((type) => payload.allowedTypes.includes(type))
-      : TRAP_TYPES;
-    if (!allowedTypes.length) {
-      return sendJson(res, 400, { error: 'Choose at least one available trap type.' });
-    }
-    let maxPerBiweek = Number(payload.maxPerBiweek);
-    if (!Number.isFinite(maxPerBiweek) || maxPerBiweek > budget) maxPerBiweek = budget;
-    if (maxPerBiweek < 1) {
-      return sendJson(res, 400, { error: "Maximum traps per biweek must be at least 1 Fukui trap's worth." });
-    }
-
-    if (fs.existsSync(OPTIMIZE_PROGRESS_PATH)) fs.rmSync(OPTIMIZE_PROGRESS_PATH, { force: true });
-    optimizeInProgress = true;
-
-    const child = spawn('Rscript', [
-      'util_code/optimize_traps.R',
-      MODEL_DATA_DIR,
-      OUTPUT_PATH,
-      OPTIMIZE_OUTPUT_PATH,
-      OPTIMIZE_PROGRESS_PATH,
-      String(budget),
-      String(costFukui),
-      String(costShrimp),
-      String(costMinnow),
-      String(OPTIMIZE_N_DRAW),
-      String(OPTIMIZE_N_DRAW_SCORE),
-      allowedTypes.join(','),
-      String(maxPerBiweek),
-    ], { cwd: ROOT, detached: true, stdio: 'ignore' });
-    child.unref();
-    optimizeChild = child;
-    child.on('exit', () => {
-      if (optimizeChild === child) {
-        optimizeChild = null;
-        optimizeInProgress = false;
-      }
-    });
-
-    sendJson(res, 200, { started: true });
-  }).catch((error) => {
-    optimizeInProgress = false;
-    sendJson(res, 400, { error: error.message });
-  });
-}
-
-function handleOptimizeProgress(req, res) {
-  fs.readFile(OPTIMIZE_PROGRESS_PATH, 'utf8', (err, content) => {
-    if (err) return sendJson(res, 200, { phase: 'idle', completed: 0, total: 0, done: false, error: null });
-    try {
-      sendJson(res, 200, JSON.parse(content));
-    } catch (error) {
-      sendJson(res, 200, { phase: 'idle', completed: 0, total: 0, done: false, error: null });
-    }
-  });
-}
-
 // Builds the optimization download CSVs from the results JSON:
 // optimization_summary.csv (the recommended schedule, one row per trapping
 // occasion) and optimization_options.csv (every schedule from the
@@ -600,93 +486,68 @@ function buildOptimizationCsvs(result) {
   return { summaryCsv: toCsv(summaryRows), optionsCsv };
 }
 
-function readOptimizationResult(res, callback) {
-  fs.readFile(OPTIMIZE_OUTPUT_PATH, 'utf8', (err, content) => {
-    if (err) { res.writeHead(404); res.end('No optimization results found. Run the optimization first.'); return; }
-    let result;
-    try {
-      result = JSON.parse(content);
-    } catch (error) {
-      res.writeHead(500); res.end('The optimization results file is corrupted.'); return;
-    }
-    callback(result);
-  });
+// The two optimization downloads, built when an optimization finishes and
+// handed to the browser with the results.
+//   summaryZip  "Download optimization summary": the recommended schedule and
+//               its README (with a single option, also the options CSV, since
+//               there's no alternatives pop-up to download it from)
+//   optionsZip  "Download trap schedule options" in the alternatives pop-up
+//               (null with a single option)
+function optimizationZips(result) {
+  const { summaryCsv, optionsCsv } = buildOptimizationCsvs(result);
+  const single = Boolean(optionsCsv) && result.options.length === 1;
+  const summaryFiles = [{ name: 'optimization_summary.csv', data: Buffer.from(summaryCsv) }];
+  if (single) summaryFiles.push({ name: 'optimization_options.csv', data: Buffer.from(optionsCsv) });
+  summaryFiles.push({ name: 'README.txt', data: Buffer.from(optimizationSummaryReadme(result, single)) });
+  return {
+    summaryZip: buildZip(summaryFiles),
+    optionsZip: optionsCsv && !single
+      ? buildZip([
+        { name: 'optimization_options.csv', data: Buffer.from(optionsCsv) },
+        { name: 'README.txt', data: Buffer.from(optimizationOptionsReadme(result)) },
+      ])
+      : null,
+  };
 }
 
-// "Download optimization summary": the recommended schedule and its README
-function handleOptimizeDownload(req, res) {
-  readOptimizationResult(res, (result) => {
-    const { summaryCsv, optionsCsv } = buildOptimizationCsvs(result);
-    // with a single option there is no alternatives pop-up to download the
-    // options from, so they are included here (a README covers both files)
-    const single = Boolean(optionsCsv) && result.options.length === 1;
-    const files = [{ name: 'optimization_summary.csv', data: Buffer.from(summaryCsv) }];
-    if (single) files.push({ name: 'optimization_options.csv', data: Buffer.from(optionsCsv) });
-    files.push({ name: 'README.txt', data: Buffer.from(optimizationSummaryReadme(result, single)) });
-    res.writeHead(200, {
-      'Content-Type': 'application/zip',
-      'Content-Disposition': 'attachment; filename="optimization_summary.zip"',
-    });
-    res.end(buildZip(files));
-  });
-}
-
-// "Download trap schedule options" (in the near-optimal alternatives pop-up):
-// every schedule from the multi-start search and its README
-function handleOptimizeOptionsDownload(req, res) {
-  readOptimizationResult(res, (result) => {
-    const { optionsCsv } = buildOptimizationCsvs(result);
-    if (!optionsCsv) { res.writeHead(404); res.end('These optimization results have no alternative schedules.'); return; }
-    res.writeHead(200, {
-      'Content-Type': 'application/zip',
-      'Content-Disposition': 'attachment; filename="optimization_options.zip"',
-    });
-    res.end(buildZip([
-      { name: 'optimization_options.csv', data: Buffer.from(optionsCsv) },
-      { name: 'README.txt', data: Buffer.from(optimizationOptionsReadme(result)) },
-    ]));
-  });
-}
-
-// what the results page needs to lay itself out (e.g. whether to offer the
-// near-optimal alternatives)
-function handleOptimizeResult(req, res) {
-  readOptimizationResult(res, (result) => {
-    // traps of each type in the recommended schedule, and the effort they
-    // use in Fukui traps' worth, for the results page's summary sentence
-    const traps = {};
-    let effortUsed = 0;
-    for (const [type, counts] of Object.entries(result.schedule)) {
-      traps[type] = counts.reduce((sum, count) => sum + Number(count), 0);
-      effortUsed += traps[type] * Number(result.cost[type]);
-    }
-    sendJson(res, 200, {
-      budget: result.budget,
-      nOptions: Array.isArray(result.options) ? result.options.length : 1,
-      traps,
-      effortUsed,
-      // settings, for the suggested scenario name
-      allowedTypes: Array.isArray(result.allowed_types) ? result.allowed_types : Object.keys(result.cost),
-      maxPerBiweek: Number.isFinite(result.max_per_biweek) ? result.max_per_biweek : result.budget,
-      // the scenario these results are already saved as, if any
-      savedAs: savedScenarioName(),
-      // for the charts drawn in the browser: trapping dates, and each
-      // option's schedule and expected abundance (option 1 = optimal)
-      occasions: result.occasions.map(julianDayToDateLabel),
-      options: (Array.isArray(result.options) && result.options.length
-        ? result.options
-        : [{ schedule: result.schedule, expected_abundance: result.objective_value, abundance_95: null, reduction_vs_no_trapping: null }])
-        .map((option) => ({
-          schedule: option.schedule,
-          expectedAbundance: option.expected_abundance,
-          abundance95: option.abundance_95 || null,
-          reduction: Number.isFinite(option.reduction_vs_no_trapping) ? option.reduction_vs_no_trapping : null,
-        })),
-      noTrapping: result.no_trapping
-        ? { expectedAbundance: result.no_trapping.expected_abundance, abundance95: result.no_trapping.abundance_95 || null }
-        : null,
-    });
-  });
+// what the results page and saved scenarios need from an optimization
+function optimizationInfo(result) {
+  // traps of each type in the recommended schedule, and the effort they use
+  // in Fukui traps' worth, for the results page's summary sentence
+  const traps = {};
+  let effortUsed = 0;
+  for (const [type, counts] of Object.entries(result.schedule)) {
+    traps[type] = counts.reduce((sum, count) => sum + Number(count), 0);
+    effortUsed += traps[type] * Number(result.cost[type]);
+  }
+  return {
+    budget: result.budget,
+    cost: result.cost,
+    nOptions: Array.isArray(result.options) ? result.options.length : 1,
+    traps,
+    effortUsed,
+    // settings, for the suggested scenario name
+    allowedTypes: Array.isArray(result.allowed_types) ? result.allowed_types : Object.keys(result.cost),
+    maxPerBiweek: Number.isFinite(result.max_per_biweek) ? result.max_per_biweek : result.budget,
+    // for the charts drawn in the browser: trapping dates, and each
+    // option's schedule and expected abundance (option 1 = optimal)
+    occasions: result.occasions.map(julianDayToDateLabel),
+    options: (Array.isArray(result.options) && result.options.length
+      ? result.options
+      : [{ schedule: result.schedule, expected_abundance: result.objective_value, abundance_95: null, reduction_vs_no_trapping: null }])
+      .map((option) => ({
+        schedule: option.schedule,
+        expectedAbundance: option.expected_abundance,
+        abundance95: option.abundance_95 || null,
+        reduction: Number.isFinite(option.reduction_vs_no_trapping) ? option.reduction_vs_no_trapping : null,
+        // crabs prevented vs no trapping, paired within each posterior sample
+        prevented: Number.isFinite(option.prevented_vs_no_trapping) ? option.prevented_vs_no_trapping : null,
+        prevented95: Array.isArray(option.prevented_vs_no_trapping_95) ? option.prevented_vs_no_trapping_95 : null,
+      })),
+    noTrapping: result.no_trapping
+      ? { expectedAbundance: result.no_trapping.expected_abundance, abundance95: result.no_trapping.abundance_95 || null }
+      : null,
+  };
 }
 
 // README section describing optimization_summary.csv
@@ -892,156 +753,24 @@ One row per option, plus a final "No trapping" row for reference:
 ${columns}`;
 }
 
-// ---- Saved scenarios ----
-// Each completed optimization can be saved as a scenario (a copy of its
-// results plus a name), so runs with different effort and constraints can be
-// compared. A scenario records the fitted model it came from (the posterior
-// file's modification time): results from different fits aren't comparable,
-// so scenarios from any other fit are discarded when scenarios are listed.
-function posteriorStamp() {
-  try { return fs.statSync(OUTPUT_PATH).mtimeMs; } catch (error) { return null; }
-}
-
-function readScenarios() {
-  if (!fs.existsSync(SCENARIOS_DIR)) return [];
-  const stamp = posteriorStamp();
-  const scenarios = [];
-  for (const file of fs.readdirSync(SCENARIOS_DIR).filter((name) => name.endsWith('.json'))) {
-    const filePath = path.join(SCENARIOS_DIR, file);
-    let scenario;
-    try { scenario = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (error) { scenario = null; }
-    if (!scenario || stamp === null || scenario.posteriorStamp !== stamp) {
-      fs.rmSync(filePath, { force: true });
-      continue;
-    }
-    scenarios.push(scenario);
-  }
-  return scenarios.sort((a, b) => a.savedAt - b.savedAt);
-}
-
-// name of the saved scenario holding the current optimization results
-function savedScenarioName() {
-  try {
-    const stamp = fs.statSync(OPTIMIZE_OUTPUT_PATH).mtimeMs;
-    const match = readScenarios().find((scenario) => scenario.resultStamp === stamp);
-    return match ? match.name : null;
-  } catch (error) { return null; }
-}
-
-// what the comparison table and chart need from a scenario
-function summarizeScenario(scenario) {
-  const result = scenario.result;
-  const best = Array.isArray(result.options) && result.options.length ? result.options[0] : null;
-  const traps = {};
-  let effortUsed = 0;
-  for (const [type, counts] of Object.entries(result.schedule)) {
-    traps[type] = counts.reduce((sum, count) => sum + Number(count), 0);
-    effortUsed += traps[type] * Number(result.cost[type]);
-  }
-  return {
-    id: scenario.id,
-    name: scenario.name,
-    budget: result.budget,
-    cost: result.cost,
-    allowedTypes: Array.isArray(result.allowed_types) ? result.allowed_types : Object.keys(result.cost),
-    maxPerBiweek: Number.isFinite(result.max_per_biweek) ? result.max_per_biweek : result.budget,
-    traps,
-    effortUsed,
-    occasions: result.occasions.map(julianDayToDateLabel),
-    schedule: result.schedule,
-    expectedAbundance: best ? best.expected_abundance : result.objective_value,
-    abundance95: best ? best.abundance_95 : null,
-    reduction: best ? best.reduction_vs_no_trapping : null,
-    prevented: best && Number.isFinite(best.prevented_vs_no_trapping) ? best.prevented_vs_no_trapping : null,
-    prevented95: best && Array.isArray(best.prevented_vs_no_trapping_95) ? best.prevented_vs_no_trapping_95 : null,
-    noTrapping: result.no_trapping || null,
-  };
-}
-
-function handleListScenarios(req, res) {
-  sendJson(res, 200, { scenarios: readScenarios().map(summarizeScenario) });
-}
-
-// saves the current optimization results as a scenario
-function handleSaveScenario(req, res) {
-  readBody(req).then((raw) => {
-    let payload = {};
-    try { payload = raw ? JSON.parse(raw) : {}; } catch (error) { payload = {}; }
-    if (!fs.existsSync(OPTIMIZE_OUTPUT_PATH)) {
-      return sendJson(res, 404, { error: 'No optimization results to save. Run the optimization first.' });
-    }
-    const stamp = posteriorStamp();
-    if (stamp === null) return sendJson(res, 400, { error: 'Run the population model first.' });
-    let result;
-    try { result = JSON.parse(fs.readFileSync(OPTIMIZE_OUTPUT_PATH, 'utf8')); } catch (error) {
-      return sendJson(res, 500, { error: 'The optimization results file is corrupted.' });
-    }
-    const resultStamp = fs.statSync(OPTIMIZE_OUTPUT_PATH).mtimeMs;
-    const existing = readScenarios();
-    // the same run saved twice would just duplicate a row
-    const duplicate = existing.find((scenario) => scenario.resultStamp === resultStamp);
-    if (duplicate) return sendJson(res, 409, { error: `These results are already saved as "${duplicate.name}".` });
-    const name = String(payload.name || '').trim().slice(0, 80) || `Scenario ${existing.length + 1}`;
-    const id = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-    const scenario = { id, name, savedAt: Date.now(), posteriorStamp: stamp, resultStamp, result };
-    fs.mkdirSync(SCENARIOS_DIR, { recursive: true });
-    fs.writeFileSync(path.join(SCENARIOS_DIR, `${id}.json`), JSON.stringify(scenario));
-    sendJson(res, 200, { scenario: summarizeScenario(scenario) });
-  });
-}
-
-function handleDeleteScenario(req, res, id) {
-  if (!/^s[a-z0-9]+$/.test(id)) return sendJson(res, 400, { error: 'Unknown scenario.' });
-  fs.rmSync(path.join(SCENARIOS_DIR, `${id}.json`), { force: true });
-  sendJson(res, 200, { deleted: id });
-}
-
 const server = http.createServer((req, res) => {
   const { pathname } = new URL(req.url, `http://${req.headers.host}`);
-  if (req.method === 'POST' && pathname === '/api/prepare-data') return handlePrepareData(req, res);
-  if (req.method === 'POST' && pathname === '/api/run-model') return handleRunModel(req, res);
-  if (req.method === 'GET' && pathname === '/api/run-model/progress') return handleProgress(req, res);
-  if (req.method === 'GET' && pathname === '/api/run-model/download') return handleDownload(req, res);
-  if (req.method === 'GET' && pathname === '/api/posterior-summary/download') return handlePosteriorSummaryDownload(req, res);
-  if (req.method === 'POST' && pathname === '/api/run-model/release') return handleReleaseModel(req, res);
-  if (req.method === 'POST' && pathname === '/api/analyze-results') return handleAnalyzeResults(req, res);
-  if (req.method === 'GET' && pathname === '/api/analyze-results/progress') return handleAnalyzeProgress(req, res);
-  if (req.method === 'GET' && pathname === '/api/analyze-results/data') return handleAnalyzeData(req, res);
-  if (req.method === 'POST' && pathname === '/api/optimize-traps') return handleOptimizeTraps(req, res);
-  if (req.method === 'POST' && pathname === '/api/optimize-traps/release') return handleReleaseOptimize(req, res);
-  if (req.method === 'GET' && pathname === '/api/optimize-traps/progress') return handleOptimizeProgress(req, res);
-  if (req.method === 'GET' && pathname === '/api/optimize-traps/download') return handleOptimizeDownload(req, res);
-  if (req.method === 'GET' && pathname === '/api/optimize-traps/result') return handleOptimizeResult(req, res);
-  if (req.method === 'GET' && pathname === '/api/optimize-traps/options/download') return handleOptimizeOptionsDownload(req, res);
+  if (req.method === 'POST' && pathname === '/api/jobs') return handleCreateJob(req, res);
+  const jobMatch = pathname.match(/^\/api\/jobs\/([^/]+)(\/result)?$/);
+  if (jobMatch) {
+    const id = jobMatch[1];
+    if (!jobsLib.isJobId(id)) return sendJson(res, 404, { error: 'Unknown run.' });
+    if (req.method === 'GET' && jobMatch[2]) return handleJobResult(req, res, id);
+    if (req.method === 'GET') return handleJobStatus(req, res, id);
+    if (req.method === 'DELETE') return handleCancelJob(req, res, id);
+  }
   if (req.method === 'POST' && pathname === '/api/chat') return chat.handleChat(req, res);
   if (req.method === 'GET' && pathname === '/api/chat/config') return chat.handleChatConfig(req, res);
-  if (req.method === 'GET' && pathname === '/api/chat/context') return chat.handleChatContext(req, res);
-  if (req.method === 'GET' && pathname === '/api/scenarios') return handleListScenarios(req, res);
-  if (req.method === 'POST' && pathname === '/api/scenarios') return handleSaveScenario(req, res);
-  if (req.method === 'DELETE' && pathname.startsWith('/api/scenarios/')) return handleDeleteScenario(req, res, pathname.slice('/api/scenarios/'.length));
+  if (req.method === 'POST' && pathname === '/api/chat/context') return chat.handleChatContext(req, res);
   if (req.method === 'GET') return serveStatic(req, res, pathname);
   res.writeHead(405);
   res.end('Method not allowed');
 });
-
-// A run that was in progress when the server stopped (for example, a
-// restart after running out of memory) can't finish: its R process is gone,
-// but its progress file still says it's running, so the page would wait for
-// it forever. Mark such runs as failed when the server starts.
-function markInterruptedRuns() {
-  for (const progressPath of [PROGRESS_PATH, ANALYZE_PROGRESS_PATH, OPTIMIZE_PROGRESS_PATH]) {
-    let progress;
-    try { progress = JSON.parse(fs.readFileSync(progressPath, 'utf8')); } catch (error) { continue; }
-    if (!progress || progress.done) continue;
-    fs.writeFileSync(progressPath, JSON.stringify({
-      ...progress,
-      done: true,
-      error: 'This run was interrupted because the server restarted (for example, after running out of memory). Please run it again.',
-      updatedAt: new Date().toISOString(),
-    }));
-  }
-}
-markInterruptedRuns();
 
 server.listen(PORT, () => {
   console.log(`EGC Decision Support running at http://localhost:${PORT}`);

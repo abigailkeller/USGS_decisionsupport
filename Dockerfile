@@ -26,7 +26,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY index.html script.js server.js styles.css ./
+COPY index.html script.js server.js jobs.js styles.css ./
 COPY chat ./chat
 COPY util_code ./util_code
 COPY sample_data ./sample_data
@@ -34,11 +34,10 @@ COPY img ./img
 # only the images the page shows (not the .ai / .R sources in figures/)
 COPY figures/*.png figures/*.svg ./figures/
 
-# Uploaded CSVs land in data/staging, prepped model inputs in
-# data/model_data, and MCMC/analysis output in data/posterior_samples --
-# all written at runtime by server.js and the R scripts it spawns. Declared
-# as a volume so a run's results survive the container being recreated.
-RUN mkdir -p data/staging data/model_data data/posterior_samples
+# Each user's data is kept in their browser. While a model fit, analysis or
+# optimization runs, its inputs and outputs sit in a private folder under
+# data/jobs (see jobs.js), deleted once the browser has collected them.
+RUN mkdir -p data/jobs
 VOLUME /app/data
 
 # Chatbot settings (see chat/chat.js). Pass secrets at run time, never in the

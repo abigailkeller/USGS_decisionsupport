@@ -191,9 +191,15 @@ function resetQualityChecks() {
 }
 
 function resetRegimeEstimation() {
-  clearInterval(regimeProgressTimer);
-  clearInterval(analyzeProgressTimer);
+  // stop this user's model fit / analysis and drop the results kept for it
+  cancelJob('fit');
+  cancelJob('analyze');
+  releaseFit();
+  userData.fit = null;
   analyzeData = null;
+  // saved scenarios belong to the fitted model they were run on
+  userData.scenarios = [];
+  renderScenarios([]);
 
   const regimeRing = document.querySelector('#regime-run-ring');
   const regimeButton = document.querySelector('#regime-run-button');
@@ -219,10 +225,6 @@ function resetRegimeEstimation() {
 
   document.querySelector('#regime-next-button').disabled = true;
 
-  // release any parked or in-progress model process tied to the data that's
-  // about to be replaced
-  fetch('api/run-model/release', { method: 'POST' }).catch(() => {});
-
   // the optimization depends on the model run, so it's reset too
   resetOptimization();
 }
@@ -230,7 +232,8 @@ function resetRegimeEstimation() {
 // Resets the optimization step (used when the data or the objective
 // changes), stopping any run in progress and discarding its results
 function resetOptimization() {
-  clearInterval(optimizeProgressTimer);
+  cancelJob('optimize');
+  userData.optimization = null;
   const ring = document.querySelector('#optimize-run-ring');
   const button = document.querySelector('#optimize-run-button');
   if (ring) ring.classList.remove('is-done');
@@ -240,8 +243,6 @@ function resetOptimization() {
   document.querySelector('#optimize-run-error').hidden = true;
   if (button) button.disabled = false;
   hideOptimizationResults();
-
-  fetch('api/optimize-traps/release', { method: 'POST' }).catch(() => {});
 }
 
 function selectedColumnIndex(kind, key) {
@@ -892,10 +893,9 @@ document.querySelectorAll('.next-button').forEach((button) => button.addEventLis
   goToStep(nextStep);
 }));
 document.querySelector('#regime-next-button').addEventListener('click', () => {
-  // release the parked model process (if the analyze-results step never
-  // consumed it, e.g. it fell back to a standalone run) now that the user is
-  // moving on and won't need to reuse it
-  fetch('api/run-model/release', { method: 'POST' }).catch(() => {});
+  // the fit's kept-alive process is only useful to "Analyze results"; free
+  // it now that the user is moving on
+  releaseFit();
 });
 document.querySelectorAll('.back-button-control').forEach((button) => button.addEventListener('click', () => goToStep(Number(button.dataset.back))));
 stepLinks.forEach((link) => link.addEventListener('click', () => goToStep(Number(link.dataset.step))));
@@ -947,42 +947,135 @@ async function parseJsonResponse(response) {
   }
 }
 
-let regimeProgressTimer = null;
+// ---- this user's data, kept in the browser ----
+// Model inputs, posterior samples and results live here, in the open page,
+// not on the server, so people using the app at the same time can't see or
+// overwrite each other's data. Each step sends the server what it needs and
+// collects the outputs (see jobs.js); the server deletes them afterwards.
+// Reloading or closing the page clears them.
+const userData = {
+  // { fitId, modelType, modelData, posterior, posteriorSummaryCsv, posteriorSummaryZip }
+  fit: null,
+  // { result, info, summaryZip, optionsZip }
+  optimization: null,
+  // saved optimization scenarios (see scenarioFromOptimization)
+  scenarios: [],
+};
 
-function pollModelProgress() {
-  const ring = document.querySelector('#regime-run-ring');
-  const title = document.querySelector('#regime-run-title');
-  const copy = document.querySelector('#regime-run-copy');
-  const bar = document.querySelector('#regime-run-bar');
-  const errorEl = document.querySelector('#regime-run-error');
-  const button = document.querySelector('#regime-run-button');
+// For the chatbot: the results to send with each question (see chat/chat.js)
+function chatResults() {
+  return {
+    posteriorSummaryCsv: userData.fit?.posteriorSummaryCsv || null,
+    analysis: analyzeData,
+    optimization: userData.optimization?.result || null,
+    scenarios: userData.scenarios,
+  };
+}
 
-  const PHASE_LABELS = { preparing: 'Preparing data', compiling: 'Building and compiling the model', sampling: 'Sampling', saving: 'Saving results' };
+// ---- running steps on the server ----
+// One job per step at a time; starting a new one cancels the old.
+const activeJobs = { fit: null, analyze: null, optimize: null };
+class JobCancelled extends Error {}
 
-  clearInterval(regimeProgressTimer);
-  regimeProgressTimer = setInterval(() => {
-    fetch('api/run-model/progress').then((response) => response.json()).then((progress) => {
-      const percent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
-      bar.style.width = `${percent}%`;
-      title.textContent = PHASE_LABELS[progress.phase] || 'Running';
-      copy.textContent = progress.message || '';
-      if (progress.done) {
-        clearInterval(regimeProgressTimer);
-        button.disabled = false;
-        if (progress.error) {
-          showError(errorEl, progress.error);
-          title.textContent = 'Model run failed';
-        } else {
-          ring.classList.add('is-done');
-          title.textContent = 'Model run complete';
-          copy.textContent = 'Saving posterior samples';
-          bar.style.width = '100%';
-          document.querySelector('#regime-download-button').hidden = false;
-          document.querySelector('#analyze-card').hidden = false;
+// Starts a server job, calls onProgress with its status as it runs (queued,
+// then the R script's progress), and resolves with its outputs.
+function runJob(kind, payload, onProgress) {
+  cancelJob(kind);
+  const handle = { id: null, cancelled: false };
+  activeJobs[kind] = handle;
+  const finish = () => { if (activeJobs[kind] === handle) activeJobs[kind] = null; };
+  const wait = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+  return (async () => {
+    try {
+      const startResponse = await fetch('api/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: kind, ...payload }),
+      });
+      const started = await parseJsonResponse(startResponse);
+      if (!startResponse.ok) throw new Error(started.error || 'Could not start the run.');
+      handle.id = started.id;
+      if (handle.cancelled) { deleteJob(handle.id); throw new JobCancelled(); }
+
+      let failures = 0;
+      for (;;) {
+        if (handle.cancelled) throw new JobCancelled();
+        let status;
+        try {
+          const response = await fetch(`api/jobs/${handle.id}`);
+          status = await parseJsonResponse(response);
+          if (!response.ok) throw new Error(status.error || 'Lost track of this run. Please run it again.');
+          failures = 0;
+        } catch (error) {
+          // a brief network hiccup shouldn't end the run; a missing job should
+          if (/run it again|interrupted/i.test(error.message) || ++failures > 20) throw error;
+          await wait(1500);
+          continue;
         }
+        if (handle.cancelled) throw new JobCancelled();
+        onProgress(status);
+        if (status.status === 'failed') throw new Error(status.error || 'The run failed.');
+        if (status.status === 'done') break;
+        await wait(1500);
       }
-    }).catch(() => {});
-  }, 1500);
+
+      const resultResponse = await fetch(`api/jobs/${handle.id}/result`);
+      const result = await parseJsonResponse(resultResponse);
+      if (!resultResponse.ok) throw new Error(result.error || 'Could not collect the results.');
+      if (handle.cancelled) throw new JobCancelled();
+      return result;
+    } catch (error) {
+      // a failed run's files would otherwise wait on the server for the
+      // hourly clean-up
+      if (!(error instanceof JobCancelled)) deleteJob(handle.id);
+      throw error;
+    } finally {
+      finish();
+    }
+  })();
+}
+
+function deleteJob(id, keepalive = false) {
+  if (id) fetch(`api/jobs/${id}`, { method: 'DELETE', keepalive }).catch(() => {});
+}
+
+function cancelJob(kind) {
+  const handle = activeJobs[kind];
+  if (!handle) return;
+  handle.cancelled = true;
+  deleteJob(handle.id);
+  activeJobs[kind] = null;
+}
+
+// frees the fit's kept-alive model process on the server (it only speeds up
+// "Analyze results")
+function releaseFit(keepalive = false) {
+  if (userData.fit) deleteJob(userData.fit.fitId, keepalive);
+}
+
+// leaving the page: stop this user's runs so others don't wait behind them
+window.addEventListener('pagehide', () => {
+  Object.values(activeJobs).forEach((handle) => { if (handle) deleteJob(handle.id, true); });
+  releaseFit(true);
+});
+
+// progress bar, title and message for a job's status
+function showJobProgress(status, els, labels) {
+  const percent = status.total > 0 ? Math.round((status.completed / status.total) * 100) : 0;
+  els.bar.style.width = `${percent}%`;
+  els.title.textContent = status.phase === 'queued' ? 'Waiting in line' : (labels[status.phase] || 'Running');
+  els.copy.textContent = status.message || '';
+}
+
+// a zip sent by the server (base64) as the target of a download link
+function setZipDownload(link, base64, filename) {
+  if (link.href.startsWith('blob:')) URL.revokeObjectURL(link.href);
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  link.href = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
+  link.download = filename;
 }
 
 document.querySelector('#regime-run-button').addEventListener('click', (event) => {
@@ -999,7 +1092,14 @@ document.querySelector('#regime-run-button').addEventListener('click', (event) =
   document.querySelector('#analyze-controls').hidden = true;
   document.querySelector('#analyze-results-panel').hidden = true;
   document.querySelector('#regime-next-button').disabled = true;
+  // a new fit replaces everything that depended on the old one
+  cancelJob('analyze');
+  releaseFit();
+  userData.fit = null;
   analyzeData = null;
+  userData.scenarios = [];
+  renderScenarios([]);
+  resetOptimization();
   button.disabled = true;
   ring.classList.remove('is-done');
   bar.style.width = '0%';
@@ -1013,32 +1113,28 @@ document.querySelector('#regime-run-button').addEventListener('click', (event) =
     return;
   }
 
-  fetch('api/prepare-data', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ catchRows, effortRows }),
-  }).then(async (response) => {
-    const result = await parseJsonResponse(response);
-    if (!response.ok) throw new Error(result.error || 'Data preparation failed.');
-    title.textContent = 'Building and compiling the model';
-    copy.textContent = 'This can take a minute the first time.';
-    return fetch('api/run-model', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    });
-  }).then(async (response) => {
-    const result = await parseJsonResponse(response);
-    if (!response.ok) throw new Error(result.error || 'Could not start the model run.');
-    pollModelProgress();
-  }).catch((error) => {
-    showError(errorEl, error.message);
-    button.disabled = false;
-  });
+  const PHASE_LABELS = { preparing: 'Preparing data', compiling: 'Building and compiling the model', sampling: 'Sampling', saving: 'Saving results' };
+  runJob('fit', { catchRows, effortRows }, (status) => showJobProgress(status, { bar, title, copy }, PHASE_LABELS))
+    .then((result) => {
+      userData.fit = result;
+      ring.classList.add('is-done');
+      title.textContent = 'Model run complete';
+      copy.textContent = 'Posterior samples are ready.';
+      bar.style.width = '100%';
+      const download = document.querySelector('#regime-download-button');
+      setZipDownload(download, result.posteriorSummaryZip, 'posterior_summary.zip');
+      download.hidden = false;
+      document.querySelector('#analyze-card').hidden = false;
+    })
+    .catch((error) => {
+      if (error instanceof JobCancelled) return;
+      showError(errorEl, error.message);
+      title.textContent = 'Model run failed';
+    })
+    .finally(() => { button.disabled = false; });
 });
 
 let analyzeData = null;
-let analyzeProgressTimer = null;
 
 function populateAnalysisControls() {
   const yearSelect = document.querySelector('#analyze-year-select');
@@ -1318,51 +1414,6 @@ function renderOverwinterChart() {
 document.querySelector('#analyze-year-select').addEventListener('change', renderAnalysisCharts);
 document.querySelector('#analyze-time-slider').addEventListener('input', renderAnalysisCharts);
 
-function pollAnalyzeProgress() {
-  const ring = document.querySelector('#analyze-run-ring');
-  const title = document.querySelector('#analyze-run-title');
-  const copy = document.querySelector('#analyze-run-copy');
-  const bar = document.querySelector('#analyze-run-bar');
-  const errorEl = document.querySelector('#analyze-run-error');
-  const button = document.querySelector('#analyze-run-button');
-  const panel = document.querySelector('#analyze-results-panel');
-
-  const PHASE_LABELS = { preparing: 'Preparing data', compiling: 'Building and compiling the model', simulating: 'Simulating', saving: 'Saving results' };
-
-  clearInterval(analyzeProgressTimer);
-  analyzeProgressTimer = setInterval(() => {
-    fetch('api/analyze-results/progress').then((response) => response.json()).then((progress) => {
-      const percent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
-      bar.style.width = `${percent}%`;
-      title.textContent = PHASE_LABELS[progress.phase] || 'Running';
-      copy.textContent = progress.message || '';
-      if (progress.done) {
-        clearInterval(analyzeProgressTimer);
-        button.disabled = false;
-        if (progress.error) {
-          showError(errorEl, progress.error);
-          title.textContent = 'Analysis failed';
-          return;
-        }
-        ring.classList.add('is-done');
-        title.textContent = 'Analysis complete';
-        copy.textContent = 'Use "What to plot" to explore the results.';
-        bar.style.width = '100%';
-        fetch('api/analyze-results/data').then((response) => parseJsonResponse(response)).then((data) => {
-          analyzeData = data;
-          populateAnalysisControls();
-          document.querySelector('#analyze-controls').hidden = false;
-          panel.hidden = false;
-          renderAnalysisCharts();
-          renderOverwinterChart();
-          setupAnalysisViews();
-          document.querySelector('#regime-next-button').disabled = false;
-        }).catch((error) => showError(errorEl, error.message));
-      }
-    }).catch(() => {});
-  }, 1500);
-}
-
 document.querySelector('#analyze-run-button').addEventListener('click', (event) => {
   const button = event.currentTarget;
   const ring = document.querySelector('#analyze-run-ring');
@@ -1373,31 +1424,40 @@ document.querySelector('#analyze-run-button').addEventListener('click', (event) 
   const panel = document.querySelector('#analyze-results-panel');
 
   errorEl.hidden = true;
+  if (!userData.fit) {
+    showError(errorEl, 'Run the population model first.');
+    return;
+  }
   panel.hidden = true;
   button.disabled = true;
   ring.classList.remove('is-done');
   bar.style.width = '0%';
   title.textContent = 'Starting analysis';
-  copy.textContent = 'Checking whether the compiled model can be reused...';
+  copy.textContent = 'Sending your model results to the server...';
 
-  fetch('api/analyze-results', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
-  }).then(async (response) => {
-    const result = await parseJsonResponse(response);
-    if (!response.ok) throw new Error(result.error || 'Could not start the analysis.');
-    if (result.reused) {
-      copy.textContent = 'Reusing the already-compiled model from the population model run.';
-    } else {
-      title.textContent = 'Building and compiling the model';
-      copy.textContent = 'This can take a minute the first time.';
-    }
-    pollAnalyzeProgress();
-  }).catch((error) => {
-    showError(errorEl, error.message);
-    button.disabled = false;
-  });
+  const PHASE_LABELS = { preparing: 'Preparing data', compiling: 'Building and compiling the model', simulating: 'Simulating', saving: 'Saving results' };
+  const { fitId, modelData, posterior } = userData.fit;
+  runJob('analyze', { fitId, modelData, posterior }, (status) => showJobProgress(status, { bar, title, copy }, PHASE_LABELS))
+    .then((result) => {
+      analyzeData = result.analysis;
+      ring.classList.add('is-done');
+      title.textContent = 'Analysis complete';
+      copy.textContent = 'Use "What to plot" to explore the results.';
+      bar.style.width = '100%';
+      populateAnalysisControls();
+      document.querySelector('#analyze-controls').hidden = false;
+      panel.hidden = false;
+      renderAnalysisCharts();
+      renderOverwinterChart();
+      setupAnalysisViews();
+      document.querySelector('#regime-next-button').disabled = false;
+    })
+    .catch((error) => {
+      if (error instanceof JobCancelled) return;
+      showError(errorEl, error.message);
+      title.textContent = 'Analysis failed';
+    })
+    .finally(() => { button.disabled = false; });
 });
 
 // Trapping effort is counted in Fukui traps' worth: the Fukui trap is the
@@ -1511,44 +1571,6 @@ document.querySelectorAll('.objective-trap-type').forEach((box) => {
 updateEffortExample();
 updateMaxBiweekSlider();
 
-let optimizeProgressTimer = null;
-
-function pollOptimizeProgress() {
-  const ring = document.querySelector('#optimize-run-ring');
-  const title = document.querySelector('#optimize-run-title');
-  const copy = document.querySelector('#optimize-run-copy');
-  const bar = document.querySelector('#optimize-run-bar');
-  const errorEl = document.querySelector('#optimize-run-error');
-  const button = document.querySelector('#optimize-run-button');
-
-  const PHASE_LABELS = { preparing: 'Preparing data', optimizing: 'Optimizing trap allocation', polishing: 'Refining trap schedule', scoring: 'Comparing trap schedules', saving: 'Saving results' };
-
-  clearInterval(optimizeProgressTimer);
-  optimizeProgressTimer = setInterval(() => {
-    fetch('api/optimize-traps/progress').then((response) => response.json()).then((progress) => {
-      const percent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
-      bar.style.width = `${percent}%`;
-      title.textContent = PHASE_LABELS[progress.phase] || 'Running';
-      copy.textContent = progress.message || '';
-      if (progress.done) {
-        clearInterval(optimizeProgressTimer);
-        button.disabled = false;
-        if (progress.error) {
-          showError(errorEl, progress.error);
-          title.textContent = 'Optimization failed';
-        } else {
-          ring.classList.add('is-done');
-          title.textContent = 'Optimization complete';
-          copy.textContent = 'Trap schedule saved.';
-          bar.style.width = '100%';
-          optimizationVersion = Date.now();
-          loadOptimizationResults();
-        }
-      }
-    }).catch(() => {});
-  }, 1500);
-}
-
 document.querySelector('#optimize-run-button').addEventListener('click', (event) => {
   const button = event.currentTarget;
   const ring = document.querySelector('#optimize-run-ring');
@@ -1558,34 +1580,44 @@ document.querySelector('#optimize-run-button').addEventListener('click', (event)
   const errorEl = document.querySelector('#optimize-run-error');
 
   errorEl.hidden = true;
+  if (!userData.fit) {
+    showError(errorEl, 'Run the population model first.');
+    return;
+  }
   hideOptimizationResults();
+  userData.optimization = null;
   button.disabled = true;
   ring.classList.remove('is-done');
   bar.style.width = '0%';
   title.textContent = 'Preparing data';
-  copy.textContent = 'Loading model inputs and posterior samples...';
+  copy.textContent = 'Sending your model results to the server...';
 
-  const budget = Number(document.querySelector('#objective-budget').value);
-  const costFukui = Number(document.querySelector('#objective-cost-fukui').value);
-  const costShrimp = Number(document.querySelector('#objective-cost-shrimp').value);
-  const costMinnow = Number(document.querySelector('#objective-cost-minnow').value);
-
-  fetch('api/optimize-traps', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      budget, costFukui, costShrimp, costMinnow,
-      allowedTypes: availableTrapTypes(),
-      maxPerBiweek: Number(document.querySelector('#objective-max-biweek').value),
-    }),
-  }).then(async (response) => {
-    const result = await parseJsonResponse(response);
-    if (!response.ok) throw new Error(result.error || 'Could not start the optimization run.');
-    pollOptimizeProgress();
-  }).catch((error) => {
-    showError(errorEl, error.message);
-    button.disabled = false;
-  });
+  const settings = {
+    budget: Number(document.querySelector('#objective-budget').value),
+    costFukui: Number(document.querySelector('#objective-cost-fukui').value),
+    costShrimp: Number(document.querySelector('#objective-cost-shrimp').value),
+    costMinnow: Number(document.querySelector('#objective-cost-minnow').value),
+    allowedTypes: availableTrapTypes(),
+    maxPerBiweek: Number(document.querySelector('#objective-max-biweek').value),
+  };
+  const PHASE_LABELS = { preparing: 'Preparing data', optimizing: 'Optimizing trap allocation', polishing: 'Refining trap schedule', scoring: 'Comparing trap schedules', saving: 'Saving results' };
+  const { modelData, posterior } = userData.fit;
+  runJob('optimize', { modelData, posterior, settings }, (status) => showJobProgress(status, { bar, title, copy }, PHASE_LABELS))
+    .then((result) => {
+      userData.optimization = result;
+      ring.classList.add('is-done');
+      title.textContent = 'Optimization complete';
+      copy.textContent = 'Trap schedule saved.';
+      bar.style.width = '100%';
+      optimizationVersion = Date.now();
+      loadOptimizationResults();
+    })
+    .catch((error) => {
+      if (error instanceof JobCancelled) return;
+      showError(errorEl, error.message);
+      title.textContent = 'Optimization failed';
+    })
+    .finally(() => { button.disabled = false; });
 });
 
 // ---- Optimization results (shown on step 6 once a run completes) ----
@@ -1781,9 +1813,14 @@ function loadOptimizationResults() {
   charts.hidden = true;
   status.textContent = 'Loading the optimal trap schedule...';
   status.hidden = false;
-  fetch('api/optimize-traps/result').then(async (response) => {
-    const info = await parseJsonResponse(response);
-    if (!response.ok) throw new Error(info.error || 'Could not load the optimization results.');
+  Promise.resolve().then(() => {
+    const info = userData.optimization?.info;
+    if (!info) throw new Error('No optimization results yet. Run the optimization first.');
+    // downloads built by the server when the optimization finished
+    setZipDownload(document.querySelector('#optimize-download-button'), userData.optimization.summaryZip, 'optimization_summary.zip');
+    if (userData.optimization.optionsZip) {
+      setZipDownload(document.querySelector('#options-download-button'), userData.optimization.optionsZip, 'optimization_options.zip');
+    }
     return info;
   }).then((info) => {
     optimizationInfo = info;
@@ -1801,9 +1838,9 @@ function loadOptimizationResults() {
 }
 
 // ---- Saved scenarios ----
-// Each completed run can be saved as a scenario; saved scenarios (kept on
-// the server, for the current fitted model only) are compared in a table and
-// a chart of crabs prevented compared with no trapping.
+// Each completed run can be saved as a scenario; saved scenarios (kept in
+// the browser with the rest of this user's data, for the current fitted
+// model only) are compared in a table and a chart.
 const TRAP_LABELS = { fukui: 'Fukui', minnow: 'minnow', shrimp: 'shrimp' };
 const formatCount = (value) => Math.round(value).toLocaleString('en-US');
 let savedScenarioForVersion = null;
@@ -1827,47 +1864,70 @@ function prepareScenarioSave(info) {
   const button = document.querySelector('#save-scenario-button');
   const status = document.querySelector('#scenario-save-status');
   if (savedScenarioForVersion === optimizationVersion) return;
-  document.querySelector('#scenario-name').value = info.savedAs || scenarioAutoName(info);
-  button.disabled = Boolean(info.savedAs);
-  button.textContent = info.savedAs ? 'Saved' : 'Save scenario';
-  status.textContent = info.savedAs ? `Saved as "${info.savedAs}". Change the settings and run again to add another scenario.` : '';
+  const savedAs = userData.scenarios.find((sc) => sc.version === optimizationVersion)?.name;
+  document.querySelector('#scenario-name').value = savedAs || scenarioAutoName(info);
+  button.disabled = Boolean(savedAs);
+  button.textContent = savedAs ? 'Saved' : 'Save scenario';
+  status.textContent = savedAs ? `Saved as "${savedAs}". Change the settings and run again to add another scenario.` : '';
   status.classList.remove('is-error');
-  status.hidden = !info.savedAs;
+  status.hidden = !savedAs;
+}
+
+// what the comparison table and chart need from an optimization run
+function scenarioFromOptimization(info, name) {
+  const best = info.options[0];
+  return {
+    id: `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    version: optimizationVersion,
+    name,
+    budget: info.budget,
+    cost: info.cost,
+    allowedTypes: info.allowedTypes,
+    maxPerBiweek: info.maxPerBiweek,
+    traps: info.traps,
+    effortUsed: info.effortUsed,
+    occasions: info.occasions,
+    schedule: best.schedule,
+    expectedAbundance: best.expectedAbundance,
+    abundance95: best.abundance95,
+    reduction: best.reduction,
+    prevented: best.prevented,
+    prevented95: best.prevented95,
+    noTrapping: info.noTrapping
+      ? { expected_abundance: info.noTrapping.expectedAbundance, abundance_95: info.noTrapping.abundance95 }
+      : null,
+  };
 }
 
 document.querySelector('#save-scenario-button').addEventListener('click', (event) => {
   const button = event.currentTarget;
   const status = document.querySelector('#scenario-save-status');
-  const name = document.querySelector('#scenario-name').value;
-  button.disabled = true;
-  fetch('api/scenarios', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
-  }).then(async (response) => {
-    const result = await parseJsonResponse(response);
-    if (!response.ok) throw new Error(result.error || 'Could not save the scenario.');
-    savedScenarioForVersion = optimizationVersion;
-    button.textContent = 'Saved';
-    status.textContent = `Saved as "${result.scenario.name}". Change the settings and run again to add another scenario.`;
-    status.classList.remove('is-error');
-    status.hidden = false;
-    loadScenarios();
-  }).catch((error) => {
-    status.textContent = error.message;
+  const info = userData.optimization?.info;
+  if (!info) return;
+  // the same run saved twice would just duplicate a row
+  const duplicate = userData.scenarios.find((sc) => sc.version === optimizationVersion);
+  if (duplicate) {
+    status.textContent = `These results are already saved as "${duplicate.name}".`;
     status.classList.add('is-error');
     status.hidden = false;
-    // an already-saved run stays disabled
-    button.disabled = /already saved/.test(error.message);
-  });
+    button.disabled = true;
+    return;
+  }
+  const name = document.querySelector('#scenario-name').value.trim().slice(0, 80) || `Scenario ${userData.scenarios.length + 1}`;
+  userData.scenarios.push(scenarioFromOptimization(info, name));
+  savedScenarioForVersion = optimizationVersion;
+  button.disabled = true;
+  button.textContent = 'Saved';
+  status.textContent = `Saved as "${name}". Change the settings and run again to add another scenario.`;
+  status.classList.remove('is-error');
+  status.hidden = false;
+  loadScenarios();
 });
 
 document.querySelector('#change-settings-button').addEventListener('click', () => goToStep(5));
 
 function loadScenarios() {
-  fetch('api/scenarios').then((response) => parseJsonResponse(response))
-    .then((data) => renderScenarios(data.scenarios || []))
-    .catch(() => {});
+  renderScenarios(userData.scenarios);
 }
 
 function renderScenarios(scenarios) {
@@ -1972,16 +2032,17 @@ function scenarioPrevented(sc) {
 }
 
 function removeScenario(id) {
-  fetch(`api/scenarios/${encodeURIComponent(id)}`, { method: 'DELETE' })
-    .then(() => {
-      // the current run can be saved again once its scenario is removed
-      savedScenarioForVersion = null;
-      const button = document.querySelector('#save-scenario-button');
-      button.disabled = false;
-      button.textContent = 'Save scenario';
-      document.querySelector('#scenario-save-status').hidden = true;
-      loadScenarios();
-    }).catch(() => {});
+  const removed = userData.scenarios.find((sc) => sc.id === id);
+  userData.scenarios = userData.scenarios.filter((sc) => sc.id !== id);
+  // the current run can be saved again once its scenario is removed
+  if (removed && removed.version === optimizationVersion) {
+    savedScenarioForVersion = null;
+    const button = document.querySelector('#save-scenario-button');
+    button.disabled = false;
+    button.textContent = 'Save scenario';
+    document.querySelector('#scenario-save-status').hidden = true;
+  }
+  loadScenarios();
 }
 
 // round axis ticks (1, 2 or 5 times a power of ten) covering [min, max]
