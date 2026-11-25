@@ -8,11 +8,11 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=32">
+  <link rel="stylesheet" href="styles.css?v=33">
 </head>
 <body>
   <main class="page-shell">
-    <header class="topbar"><a class="brand" href="#step-1" aria-label="EGC Decision Support home"><span class="brand-mark" aria-hidden="true"><img src="img/greencrab_drawing-01.png" alt=""></span><span>EGC Decision Support</span></a><span class="privacy-note"><span class="status-dot"></span>Private by default</span></header>
+    <header class="topbar"><a class="brand" href="#step-1" aria-label="EGC Decision Support home"><span class="brand-mark" aria-hidden="true"><img src="img/greencrab_drawing-01.png" alt=""></span><span>EGC Decision Support</span></a><span class="privacy-note" title="Your data and results are kept in your browser. Model runs are processed on the server and deleted when they finish."><span class="status-dot"></span>Your data isn't kept on our server</span></header>
     <div class="progress-shell"><div class="progress-meta"><span id="progress-label">Step 1 of 7</span><span id="progress-status">Getting started</span></div><div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div></div>
     <section class="workflow-layout"and train an optimization model>
       <nav class="step-nav" aria-label="Workflow steps"><p class="section-label">Workflow</p><ol id="step-nav-list">
@@ -32,7 +32,7 @@
         <article class="step-view" data-view="6"><p class="eyebrow">Step 06 / Optimization</p><h1>Find the optimal<br><em>trap schedule.</em></h1><p class="lead">Finds the optimal allocation of traps over time that minimizes the estimated EGC abundance at the start of the next trapping season.</p><button class="secondary-button" id="optimize-learn-more-button" type="button">Learn more</button><div class="training-card"><div class="training-status"><span class="status-ring" id="optimize-run-ring"></span><div><span class="chart-kicker">Trap schedule optimization</span><h2 id="optimize-run-title">Ready to optimize</h2><p id="optimize-run-copy">Finds the trap schedule that minimizes the estimated abundance at the start of the next trapping season.</p></div></div><button class="primary-button" id="optimize-run-button" type="button">Run optimization <span aria-hidden="true">▶</span></button><div class="training-progress"><div id="optimize-run-bar"></div></div><p class="error-message" id="optimize-run-error" role="alert" hidden></p></div><div class="chart-panel optimization-result-panel" id="optimization-result-panel" hidden><h2 class="optimization-results-title">Optimization results</h2><p class="optimization-effort-summary" id="optimization-effort-summary" hidden></p><p class="chart-empty" id="optimization-plot-status">Loading the optimal trap schedule...</p><div class="optimization-charts" id="optimization-charts" hidden><div class="optimization-chart"><div class="chart-heading"><h3>Optimal trapping schedule</h3><button class="chart-download-button" type="button" data-target="chart-optimal-schedule" data-filename="optimal-trapping-schedule" aria-label="Download optimal trapping schedule chart as PNG"><span aria-hidden="true">↓</span></button></div><div class="chart-mount" id="chart-optimal-schedule"></div></div><div class="optimization-chart"><div class="chart-heading"><h3>Abundance at the start of next season</h3><button class="chart-download-button" type="button" data-target="chart-optimal-abundance" data-filename="abundance-next-season" aria-label="Download abundance at the start of next season chart as PNG"><span aria-hidden="true">↓</span></button></div><div class="chart-mount" id="chart-optimal-abundance"></div></div></div><div class="optimization-actions"><a class="secondary-button" id="optimize-download-button" href="#" download="optimization_summary.zip">Download optimization summary <span aria-hidden="true">↓</span></a><button class="secondary-button" id="explore-alternatives-button" type="button" hidden>Explore other near-optimal alternatives</button></div></div><div class="chart-panel scenario-save" id="scenario-save-panel" hidden><label class="scenario-save-label" for="scenario-name">Save these results as a scenario</label><p class="field-hint">If you want to compare optimization scenarios, save this run and then change the settings and run again.</p><div class="scenario-save-row"><input type="text" id="scenario-name" maxlength="80" aria-label="Scenario name"><button class="primary-button" id="save-scenario-button" type="button">Save scenario</button><button class="secondary-button" id="change-settings-button" type="button">Change settings and run again</button></div><p class="scenario-save-status" id="scenario-save-status" role="status" hidden></p></div><div class="chart-panel scenarios-panel" id="scenarios-panel" hidden><div class="chart-heading"><h2>Compare scenarios</h2></div><div class="scenario-table-wrap"><table class="scenario-table" id="scenario-table"></table></div><div class="optimization-actions"><button class="secondary-button" id="scenario-table-download" type="button">Download comparison table <span aria-hidden="true">↓</span></button></div><div class="chart-heading scenario-chart-heading"><h3 class="scenario-chart-title">Expected abundance at the start of next season</h3><button class="chart-download-button" type="button" data-target="chart-scenarios" data-filename="scenario-comparison" aria-label="Download scenario comparison chart as PNG"><span aria-hidden="true">↓</span></button></div><p class="chart-annotation">Dots show the expected (average) number of crabs at the start of next season under each scenario's optimal trap schedule, and lines the 95% credible interval. The percentage is the reduction compared with no trapping. Every scenario is scored on the same posterior samples, so the scenarios can be compared directly.</p><div class="chart-mount" id="chart-scenarios"></div></div><div class="action-row"><button class="back-button back-button-control" data-back="5" type="button">← Back</button></div></article>
       </section>
     </section>
-    <footer><span>EGC Decision Support</span><span>Nothing leaves your device</span></footer>
+    <footer><span>EGC Decision Support</span><span class="footer-privacy">Your data and results are kept in your browser and cleared when you close the page. Model runs are processed on the server and deleted when they finish.<span id="footer-chat-note"></span></span></footer>
   </main>
   <dialog id="homepage-learn-more-dialog" class="homepage-dialog">
     <button class="dialog-close" id="homepage-learn-more-close" type="button" aria-label="Close">×</button>
@@ -138,6 +138,26 @@
     </div>
     <img id="process-detail-image" src="" alt="">
   </dialog>
-  <script src="script.js?v=33"></script>
+  <button class="chat-launcher" id="chat-launcher" type="button" hidden aria-expanded="false" aria-controls="chat-panel">Ask about your results</button>
+  <aside class="chat-panel" id="chat-panel" hidden aria-labelledby="chat-panel-title">
+    <div class="chat-panel-header">
+      <div>
+        <h2 id="chat-panel-title">Ask about your results</h2>
+        <p>An AI assistant that answers from the results on this page and the app's own explanations. It can make mistakes, so check the downloads for exact numbers.</p>
+      </div>
+      <button class="chat-close" id="chat-close" type="button" aria-label="Close the assistant">×</button>
+    </div>
+    <div class="chat-messages" id="chat-messages" aria-live="polite"></div>
+    <form class="chat-form" id="chat-form">
+      <label class="visually-hidden" for="chat-input">Your question</label>
+      <textarea id="chat-input" rows="2" maxlength="4000" placeholder="e.g. Why was recruitment so different between years?"></textarea>
+      <button class="primary-button" id="chat-send" type="submit">Send</button>
+    </form>
+    <div class="chat-panel-footer">
+      <p class="chat-privacy" id="chat-privacy"></p>
+      <button class="chat-new" id="chat-new" type="button">New conversation</button>
+    </div>
+  </aside>
+  <script src="script.js?v=34"></script>
 </body>
 </html>

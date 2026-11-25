@@ -2155,3 +2155,145 @@ setupDismissableDialog(alternativesDialog, document.querySelector('#alternatives
 
 const initialStep = Number(window.location.hash.replace('#step-', ''));
 goToStep(initialStep >= 1 && initialStep <= totalSteps && canEnterStep(initialStep) ? initialStep : 1);
+
+// ---- "Ask about your results" chat assistant ----
+// Sends the conversation and this page's results (chatResults) to
+// api/chat, which streams the answer back. The launcher only appears when
+// the server has a chat service set up (see chat/chat.js).
+const chat = {
+  launcher: document.querySelector('#chat-launcher'),
+  panel: document.querySelector('#chat-panel'),
+  messagesEl: document.querySelector('#chat-messages'),
+  form: document.querySelector('#chat-form'),
+  input: document.querySelector('#chat-input'),
+  send: document.querySelector('#chat-send'),
+  history: [], // { role: 'user' | 'assistant', content }
+  busy: false,
+};
+
+fetch('api/chat/config').then((response) => response.json()).then((config) => {
+  if (!config.enabled) return;
+  document.querySelector('#chat-privacy').textContent = config.privacyNote || '';
+  const footerNote = document.querySelector('#footer-chat-note');
+  if (footerNote && config.privacyNote) footerNote.textContent = ` ${config.privacyNote.replace(/^Your questions/, 'Chat questions')}`;
+  chat.launcher.hidden = false;
+}).catch(() => {});
+
+function openChat(open) {
+  chat.panel.hidden = !open;
+  chat.launcher.hidden = open;
+  chat.launcher.setAttribute('aria-expanded', String(open));
+  if (open) {
+    if (!chat.messagesEl.children.length) {
+      addChatBubble('assistant', 'Hi! Ask me about your results or how the app works, for example what the estimated recruitment means, or why the optimization chose this schedule. I can only see the results produced on this page.');
+    }
+    chat.input.focus();
+  } else {
+    chat.launcher.focus();
+  }
+}
+chat.launcher.addEventListener('click', () => openChat(true));
+document.querySelector('#chat-close').addEventListener('click', () => openChat(false));
+chat.panel.addEventListener('keydown', (event) => { if (event.key === 'Escape') openChat(false); });
+
+document.querySelector('#chat-new').addEventListener('click', () => {
+  if (chat.busy) return;
+  chat.history = [];
+  chat.messagesEl.innerHTML = '';
+  openChat(true);
+});
+
+// Enter sends; Shift+Enter starts a new line
+chat.input.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); chat.form.requestSubmit(); }
+});
+
+// light formatting for answers: paragraphs, **bold**, bullet and numbered
+// lists. The text is escaped first, so nothing in an answer can inject HTML.
+function formatChatText(text) {
+  const blocks = escapeHtml(text.trim()).split(/\n{2,}/);
+  return blocks.map((block) => {
+    const lines = block.split('\n');
+    const bold = (line) => line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/^#{1,6}\s+(.*)$/, '<strong>$1</strong>');
+    if (lines.every((line) => /^\s*[-*•]\s+/.test(line))) {
+      return `<ul>${lines.map((line) => `<li>${bold(line.replace(/^\s*[-*•]\s+/, ''))}</li>`).join('')}</ul>`;
+    }
+    if (lines.every((line) => /^\s*\d+[.)]\s+/.test(line))) {
+      return `<ol>${lines.map((line) => `<li>${bold(line.replace(/^\s*\d+[.)]\s+/, ''))}</li>`).join('')}</ol>`;
+    }
+    return `<p>${lines.map(bold).join('<br>')}</p>`;
+  }).join('');
+}
+
+function addChatBubble(role, text, { error = false } = {}) {
+  const bubble = document.createElement('div');
+  bubble.className = `chat-bubble chat-${role}${error ? ' is-error' : ''}`;
+  bubble.innerHTML = role === 'user' ? `<p>${escapeHtml(text).replace(/\n/g, '<br>')}</p>` : formatChatText(text);
+  chat.messagesEl.append(bubble);
+  chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
+  return bubble;
+}
+
+chat.form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const question = chat.input.value.trim();
+  if (!question || chat.busy) return;
+  chat.busy = true;
+  chat.send.disabled = true;
+  chat.input.value = '';
+  addChatBubble('user', question);
+  chat.history.push({ role: 'user', content: question });
+  const bubble = addChatBubble('assistant', '…');
+  bubble.classList.add('is-pending');
+
+  // a failed question is taken back out of the conversation and put back
+  // in the box, so it can simply be sent again
+  const fail = (message) => {
+    bubble.classList.remove('is-pending');
+    bubble.classList.add('is-error');
+    bubble.innerHTML = formatChatText(message);
+    chat.history.pop();
+    if (!chat.input.value) chat.input.value = question;
+  };
+
+  try {
+    const response = await fetch('api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: chat.history, results: chatResults() }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      fail(body.error || 'Something went wrong answering this question.');
+      return;
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let answer = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      answer += decoder.decode(value, { stream: true });
+      bubble.classList.remove('is-pending');
+      bubble.innerHTML = formatChatText(answer);
+      chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
+    }
+    answer += decoder.decode();
+    // an error partway through arrives at the end of the text
+    const errorMatch = answer.match(/\n*\[Error: ([^\]]*)\]\s*$/);
+    if (!answer.trim()) {
+      fail('No answer came back. Please try again.');
+    } else if (errorMatch && !answer.slice(0, errorMatch.index).trim()) {
+      fail(errorMatch[1]);
+    } else {
+      bubble.innerHTML = formatChatText(answer);
+      chat.history.push({ role: 'assistant', content: errorMatch ? answer.slice(0, errorMatch.index) : answer });
+      if (errorMatch) bubble.classList.add('is-error');
+    }
+  } catch (error) {
+    fail('Could not reach the server. Check your connection and try again.');
+  } finally {
+    chat.busy = false;
+    chat.send.disabled = false;
+  }
+});
