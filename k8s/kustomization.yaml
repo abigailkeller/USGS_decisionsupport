@@ -22,4 +22,4 @@ resources:
 
 images:
   - name: ghcr.io/abigailkeller/usgs_decisionsupport
-    newTag: sha-4a35316
+    newTag: sha-c2e6cfc

@@ -333,7 +333,7 @@ select { padding: 8px 27px 8px 10px; color: var(--ink); background: white; borde
 .qa-list { margin: 0; padding-left: 22px; color: var(--ink); font-size: 14px; line-height: 1.6; }
 .qa-list li + li { margin-top: 8px; }
 
-/* "Ask about your results" chat assistant */
+/* "Ask for help" chat assistant */
 .chat-launcher { position: fixed; right: 24px; bottom: 24px; z-index: 40; padding: 13px 20px; color: white; background: var(--mint-deep); border: 0; border-radius: 999px; font: inherit; font-size: 14px; font-weight: 600; box-shadow: 0 6px 18px rgba(24, 37, 34, .22); cursor: pointer; }
 .chat-launcher:hover { background: #3d8463; }
 .chat-launcher:focus-visible { outline: 3px solid var(--mint); outline-offset: 3px; }
@@ -363,6 +363,10 @@ select { padding: 8px 27px 8px 10px; color: var(--ink); background: white; borde
 .chat-privacy { margin: 0; font-size: 11px; line-height: 1.4; color: var(--muted); }
 .chat-new { flex: none; padding: 0; color: var(--mint-deep); background: none; border: 0; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
 @media (max-width: 560px) { .chat-panel { right: 0; bottom: 0; width: 100vw; height: 100vh; border: 0; } .chat-launcher { right: 16px; bottom: 16px; } }
-.footer-privacy { max-width: 560px; text-align: right; line-height: 1.5; }
-@media (max-width: 700px) { footer { flex-direction: column; gap: 8px; } .footer-privacy { text-align: left; } }
+/* "Data privacy details": a link-style button in the footer's small text */
+.footer-privacy { padding: 0; color: var(--muted); background: none; border: 0; font: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.footer-privacy:hover { color: var(--ink); }
+.privacy-dialog .homepage-dialog-body { padding-right: 72px; }
+.privacy-dialog .homepage-dialog-body p + p { margin-top: 12px; }
 .chat-privacy + .chat-privacy { margin-top: 4px; }
+body.has-chat footer { padding-bottom: 100px; }

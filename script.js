@@ -429,6 +429,11 @@ document.querySelector('#optimize-learn-more-button').addEventListener('click', 
 setupDismissableDialog(optimizeLearnMoreDialog, document.querySelector('#optimize-learn-more-close'));
 
 // "Read more" on the upload step: what the catch and effort files should contain
+// "Data privacy details" in the footer
+const privacyDetailsDialog = document.querySelector('#privacy-details-dialog');
+document.querySelector('#privacy-details-button').addEventListener('click', () => privacyDetailsDialog.showModal());
+setupDismissableDialog(privacyDetailsDialog, document.querySelector('#privacy-details-close'));
+
 const uploadReadMoreDialog = document.querySelector('#upload-read-more-dialog');
 document.querySelector('#upload-read-more-button').addEventListener('click', () => uploadReadMoreDialog.showModal());
 setupDismissableDialog(uploadReadMoreDialog, document.querySelector('#upload-read-more-close'));
@@ -2156,7 +2161,7 @@ setupDismissableDialog(alternativesDialog, document.querySelector('#alternatives
 const initialStep = Number(window.location.hash.replace('#step-', ''));
 goToStep(initialStep >= 1 && initialStep <= totalSteps && canEnterStep(initialStep) ? initialStep : 1);
 
-// ---- "Ask about your results" chat assistant ----
+// ---- "Ask for help" chat assistant ----
 // Sends the conversation and this page's results (chatResults) to
 // api/chat, which streams the answer back. The launcher only appears when
 // the server has a chat service set up (see chat/chat.js).
@@ -2174,9 +2179,15 @@ const chat = {
 fetch('api/chat/config').then((response) => response.json()).then((config) => {
   if (!config.enabled) return;
   document.querySelector('#chat-privacy').textContent = config.privacyNote || '';
-  const footerNote = document.querySelector('#footer-chat-note');
-  if (footerNote && config.privacyNote) footerNote.textContent = ` ${config.privacyNote.replace(/^Your questions/, 'Chat questions')}`;
+  // the chat sentence in the "Data privacy details" pop-up
+  const privacyChatNote = document.querySelector('#privacy-chat-note');
+  if (privacyChatNote && config.privacyNote) {
+    privacyChatNote.textContent = config.privacyNote.replace(/^Your questions/, 'Chat questions');
+    privacyChatNote.hidden = false;
+  }
   chat.launcher.hidden = false;
+  // room below the footer so the floating button doesn't cover it
+  document.body.classList.add('has-chat');
 }).catch(() => {});
 
 function openChat(open) {
