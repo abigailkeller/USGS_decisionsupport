@@ -35,17 +35,32 @@ spec:
           env:
             - name: PORT
               value: "8000"
-            # Chatbot (see chat/chat.js). It reads the Claude API key from
-            # the egc-decision-support-chat secret if that exists; without
-            # it the rest of the app works and the chatbot reports that it
-            # isn't set up.
+            # Chatbot (see chat/chat.js), using the open-weights models hosted
+            # by the National Research Platform. The key comes from the
+            # egc-decision-support-chat secret:
+            #   kubectl create secret generic egc-decision-support-chat \
+            #     --from-literal=nrp-llm-api-key="$(cat ~/.nrp_llm_key)"
+            # Without the secret the rest of the app works and the chat
+            # button doesn't appear.
             - name: CHAT_PROVIDER
-              value: anthropic
-            - name: ANTHROPIC_API_KEY
+              value: openai
+            - name: CHAT_BASE_URL
+              value: https://ellm.nrp-nautilus.io/v1
+            # tried in order: if one is down or busy, the next answers
+            - name: CHAT_MODEL
+              value: gemma,gpt-oss,qwen3-small
+            # a fresh private cache key per question, so NRP doesn't share
+            # cached prompts with its other users
+            - name: CHAT_CACHE_SALT
+              value: "1"
+            # shown in the chat panel and the page footer
+            - name: CHAT_PRIVACY_NOTE
+              value: Your questions and results are answered by AI models hosted on the National Research Platform (NRP).
+            - name: CHAT_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: egc-decision-support-chat
-                  key: anthropic-api-key
+                  key: nrp-llm-api-key
                   optional: true
           # A model fit runs 4 MCMC chains in parallel (one core each).
           # Memory peaks while the 4 chains compile the model's C++ code at

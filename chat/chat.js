@@ -14,8 +14,9 @@
 //
 // The model is swappable with environment variables:
 //   CHAT_PROVIDER   "anthropic" (Claude, default), "openrouter" (models on
-//                   OpenRouter), or "ollama" (a model running on your own
-//                   machine through Ollama)
+//                   OpenRouter), "openai" (any other service using OpenAI's
+//                   chat format, e.g. the National Research Platform's hosted
+//                   models), or "ollama" (a model running on your own machine)
 //   CHAT_MODEL      model name; default "claude-opus-5-5" for anthropic,
 //                   required for ollama (e.g. the name shown by `ollama list`).
 //                   For openrouter, one or more model IDs separated by commas,
@@ -24,6 +25,14 @@
 //   OPENROUTER_ALLOW_PAID  "1" to allow models whose IDs don't end in ":free"
 //                   (by default only free models may be used)
 //   OPENROUTER_URL  default https://openrouter.ai/api/v1
+//   With CHAT_PROVIDER "openai" (any service using OpenAI's chat format,
+//   such as the National Research Platform's hosted models):
+//   CHAT_BASE_URL   e.g. https://ellm.nrp-nautilus.io/v1
+//   CHAT_API_KEY    the service's key
+//   CHAT_CACHE_SALT "1" to send a random cache_salt with each request, so
+//                   the service doesn't share cached prompts with its other
+//                   users (NRP recommends this)
+//   CHAT_PRIVACY_NOTE  the note shown about where questions go
 //   CHAT_EFFORT     anthropic only: low | medium | high (default medium)
 //   OLLAMA_URL      default http://localhost:11434
 //   OLLAMA_NUM_CTX  context window to request from Ollama (default 32768;
@@ -34,6 +43,7 @@
 // profile) and stay on the server.
 
 const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
@@ -52,6 +62,8 @@ const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX) || 32768;
 const OPENROUTER_URL = (process.env.OPENROUTER_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
 const OPENROUTER_ALLOW_PAID = process.env.OPENROUTER_ALLOW_PAID === '1';
 const modelList = () => MODEL.split(',').map((name) => name.trim()).filter(Boolean);
+const CHAT_BASE_URL = (process.env.CHAT_BASE_URL || '').replace(/\/$/, '');
+const CHAT_CACHE_SALT = process.env.CHAT_CACHE_SALT === '1';
 const RATE_LIMIT_PER_HOUR = Number(process.env.CHAT_RATE_LIMIT_PER_HOUR) || 30;
 
 const LIMITS = { maxTurns: 40, maxQuestionChars: 4000, maxTotalChars: 60000 };
@@ -313,57 +325,42 @@ async function* streamOllama(context, messages, meta) {
   }
 }
 
-// OpenRouter: an OpenAI-compatible API in front of many models. Every
-// request requires providers that neither keep prompts (zero data
-// retention) nor collect them for training, on top of the account's own
-// privacy settings; a model with no such provider is refused by OpenRouter,
-// and the next model in CHAT_MODEL is tried.
-async function* streamOpenRouter(context, messages, meta) {
-  const key = process.env.OPENROUTER_API_KEY;
-  if (!key) throw new ChatError(500, 'The chat service is not set up: no OpenRouter API key was found on the server.');
-  const models = modelList();
-  if (!models.length) throw new ChatError(500, 'Set CHAT_MODEL to one or more OpenRouter model IDs, separated by commas.');
-  const paid = models.filter((model) => !model.endsWith(':free'));
-  if (paid.length && !OPENROUTER_ALLOW_PAID) {
-    throw new ChatError(500, `Only free models (IDs ending in ":free") are allowed, but CHAT_MODEL includes ${paid.join(', ')}. Set OPENROUTER_ALLOW_PAID=1 to allow paid models.`);
-  }
-
+// ---- services using OpenAI's chat format (OpenRouter, NRP, ...) ----
+// Tries each model in `cfg.models` in order: a model that's refused or
+// unavailable before answering falls through to the next.
+//   cfg = { url, key, models, headers, extraBody(), describe(status, detail) }
+async function* streamOpenAIFormat(context, messages, meta, cfg) {
   let lastError = null;
-  for (const model of models) {
+  for (const model of cfg.models) {
     let response;
     try {
-      response = await fetch(`${OPENROUTER_URL}/chat/completions`, {
+      response = await fetch(`${cfg.url}/chat/completions`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${key}`,
-          'Content-Type': 'application/json',
-          'X-Title': 'EGC Decision Support',
-        },
+        headers: { Authorization: `Bearer ${cfg.key}`, 'Content-Type': 'application/json', ...cfg.headers },
         body: JSON.stringify({
           model,
           stream: true,
           max_tokens: 8000,
           messages: [{ role: 'system', content: `${context.stable}\n\n${context.results}` }, ...messages],
-          // only providers that don't store prompts or train on them
-          provider: { data_collection: 'deny', zdr: true },
+          ...cfg.extraBody(),
         }),
       });
     } catch (error) {
-      lastError = new ChatError(502, 'Could not reach OpenRouter.');
+      lastError = new ChatError(502, 'Could not reach the AI service.');
       continue;
     }
     if (!response.ok) {
       const body = await response.text();
       console.error(`chat: ${model} not used (${response.status}): ${body.slice(0, 300)}`);
-      lastError = openRouterError(response.status, body);
+      lastError = cfg.describe(response.status, errorDetail(body));
       // a bad key or account problem affects every model
-      if (response.status === 401 || response.status === 402) throw lastError;
+      if (response.status === 401 || response.status === 402 || response.status === 403) throw lastError;
       continue;
     }
     meta.model = model;
     let answered = false;
     try {
-      for await (const text of readOpenRouterStream(response, model)) {
+      for await (const text of readOpenAIStream(response, model, cfg)) {
         answered = true;
         yield text;
       }
@@ -377,29 +374,31 @@ async function* streamOpenRouter(context, messages, meta) {
   throw lastError || new ChatError(502, 'No chat model is available right now. Please try again later.');
 }
 
-// a plain-English message for an OpenRouter error
-function openRouterError(status, body) {
-  let detail = '';
-  try { detail = JSON.parse(body).error?.message || ''; } catch (error) { detail = ''; }
-  if (status === 401) return new ChatError(500, 'The chat service is not set up: the OpenRouter API key is missing or invalid.');
-  if (status === 402) return new ChatError(503, 'The chat service is unavailable: the OpenRouter account needs attention (its credit balance may be negative).');
-  if (status === 429) return new ChatError(429, 'The chat has reached its question limit for now (free AI models allow a limited number of questions per day). Please try again later.');
-  if (status === 404 || /data policy|zdr|data_collection|no endpoints/i.test(detail)) {
-    return new ChatError(503, 'No AI model that meets the privacy requirements (no storing or training on questions) is available right now. Please try again later.');
-  }
-  if (status === 400 && /context|token/i.test(detail)) return new ChatError(400, 'This conversation is too long for the AI model. Start a new one.');
+function errorDetail(body) {
+  try { return JSON.parse(body).error?.message || ''; } catch (error) { return ''; }
+}
+
+// a plain-English message for an error from an OpenAI-format service
+function describeServiceError(status, detail, { tooMany }) {
+  if (status === 401 || status === 403) return new ChatError(500, 'The chat service is not set up: the AI service key is missing or invalid.');
+  if (status === 429) return new ChatError(429, tooMany);
+  if (status === 400 && /context|token|too long/i.test(detail)) return new ChatError(400, 'This conversation is too long for the AI model. Start a new one.');
   return new ChatError(502, 'The AI model is unavailable right now. Please try again later.');
 }
 
-// OpenRouter's streamed answer: server-sent events, one JSON chunk per
-// "data:" line, ending with "data: [DONE]". Lines starting with ":" are
+// A streamed answer in OpenAI's format: server-sent events, one JSON chunk
+// per "data:" line, ending with "data: [DONE]". Lines starting with ":" are
 // keep-alive comments. An error partway through arrives as a chunk with an
 // "error" field.
-async function* readOpenRouterStream(response, model) {
+async function* readOpenAIStream(response, model, cfg) {
   const decoder = new TextDecoder();
   let buffer = '';
   let finishReason = null;
   let usage = null;
+  const finish = function* () {
+    if (finishReason === 'length') yield '\n\n[The answer was cut off.]';
+    if (usage) console.log(`chat: ${model} in=${usage.prompt_tokens} out=${usage.completion_tokens}`);
+  };
   for await (const bytes of response.body) {
     buffer += decoder.decode(bytes, { stream: true });
     let newline;
@@ -408,17 +407,13 @@ async function* readOpenRouterStream(response, model) {
       buffer = buffer.slice(newline + 1);
       if (!line || line.startsWith(':') || !line.startsWith('data:')) continue;
       const data = line.slice(5).trim();
-      if (data === '[DONE]') {
-        if (finishReason === 'length') yield '\n\n[The answer was cut off.]';
-        if (usage) console.log(`chat: ${model} in=${usage.prompt_tokens} out=${usage.completion_tokens}`);
-        return;
-      }
+      if (data === '[DONE]') { yield* finish(); return; }
       let chunk;
       try { chunk = JSON.parse(data); } catch (error) { continue; }
       if (chunk.error) {
         const code = Number(chunk.error.code);
         console.error(`chat: ${model} error mid-answer: ${JSON.stringify(chunk.error).slice(0, 300)}`);
-        throw openRouterError(Number.isFinite(code) ? code : 502, JSON.stringify({ error: chunk.error }));
+        throw cfg.describe(Number.isFinite(code) ? code : 502, String(chunk.error.message || ''));
       }
       if (chunk.usage) usage = chunk.usage;
       const choice = chunk.choices && chunk.choices[0];
@@ -427,9 +422,61 @@ async function* readOpenRouterStream(response, model) {
       if (choice.delta && typeof choice.delta.content === 'string' && choice.delta.content) yield choice.delta.content;
     }
   }
+  // some services end the stream without [DONE]
+  yield* finish();
 }
 
-const PROVIDERS = { anthropic: streamAnthropic, ollama: streamOllama, openrouter: streamOpenRouter };
+// OpenRouter: every request requires providers that neither keep prompts
+// (zero data retention) nor collect them for training, on top of the
+// account's own privacy settings; a model with no such provider is refused
+// by OpenRouter, and the next model in CHAT_MODEL is tried.
+async function* streamOpenRouter(context, messages, meta) {
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key) throw new ChatError(500, 'The chat service is not set up: no OpenRouter API key was found on the server.');
+  const models = modelList();
+  if (!models.length) throw new ChatError(500, 'Set CHAT_MODEL to one or more OpenRouter model IDs, separated by commas.');
+  const paid = models.filter((model) => !model.endsWith(':free'));
+  if (paid.length && !OPENROUTER_ALLOW_PAID) {
+    throw new ChatError(500, `Only free models (IDs ending in ":free") are allowed, but CHAT_MODEL includes ${paid.join(', ')}. Set OPENROUTER_ALLOW_PAID=1 to allow paid models.`);
+  }
+  yield* streamOpenAIFormat(context, messages, meta, {
+    url: OPENROUTER_URL,
+    key,
+    models,
+    headers: { 'X-Title': 'EGC Decision Support' },
+    // only providers that don't store prompts or train on them
+    extraBody: () => ({ provider: { data_collection: 'deny', zdr: true } }),
+    describe: (status, detail) => {
+      if (status === 402) return new ChatError(503, 'The chat service is unavailable: the OpenRouter account needs attention (its credit balance may be negative).');
+      if (status === 404 || /data policy|zdr|data_collection|no endpoints/i.test(detail)) {
+        return new ChatError(503, 'No AI model that meets the privacy requirements (no storing or training on questions) is available right now. Please try again later.');
+      }
+      return describeServiceError(status, detail, { tooMany: 'The chat has reached its question limit for now (free AI models allow a limited number of questions per day). Please try again later.' });
+    },
+  });
+}
+
+// Any other service using OpenAI's chat format, such as the National
+// Research Platform's hosted models (CHAT_BASE_URL, CHAT_API_KEY).
+async function* streamOpenAICompatible(context, messages, meta) {
+  const key = process.env.CHAT_API_KEY;
+  if (!CHAT_BASE_URL) throw new ChatError(500, 'The chat service is not set up: set CHAT_BASE_URL to the AI service address.');
+  if (!key) throw new ChatError(500, 'The chat service is not set up: no CHAT_API_KEY was found on the server.');
+  const models = modelList();
+  if (!models.length) throw new ChatError(500, 'Set CHAT_MODEL to one or more model names, separated by commas.');
+  yield* streamOpenAIFormat(context, messages, meta, {
+    url: CHAT_BASE_URL,
+    key,
+    models,
+    headers: {},
+    // a fresh random cache key per request keeps the service from sharing
+    // cached prompts between its users (hex: some servers reject "/")
+    extraBody: () => (CHAT_CACHE_SALT ? { cache_salt: crypto.randomBytes(32).toString('hex') } : {}),
+    describe: (status, detail) => describeServiceError(status, detail, { tooMany: 'The AI model is busy right now. Please try again in a minute.' }),
+  });
+}
+
+const PROVIDERS = { anthropic: streamAnthropic, ollama: streamOllama, openrouter: streamOpenRouter, openai: streamOpenAICompatible };
 
 // The chat panel only appears when a provider is set up, with a note on
 // where questions go.
@@ -437,11 +484,13 @@ const PRIVACY_NOTES = {
   anthropic: 'Your questions and results are sent to Anthropic (Claude) to generate answers.',
   openrouter: 'Your questions and results are sent through OpenRouter to an AI provider that does not keep them or train on them.',
   ollama: "Your questions are answered by an AI model running on this app's own server.",
+  openai: 'Your questions and results are sent to an AI service to generate answers.',
 };
 function chatEnabled() {
   if (PROVIDER === 'anthropic') return Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || process.env.CHAT_ENABLED === '1');
   if (PROVIDER === 'openrouter') return Boolean(process.env.OPENROUTER_API_KEY && modelList().length);
   if (PROVIDER === 'ollama') return Boolean(MODEL);
+  if (PROVIDER === 'openai') return Boolean(CHAT_BASE_URL && process.env.CHAT_API_KEY && modelList().length);
   return false;
 }
 
@@ -504,7 +553,7 @@ function sendError(res, status, message) {
 // with each question (see buildResults).
 async function handleChat(req, res) {
   const streamAnswer = PROVIDERS[PROVIDER];
-  if (!streamAnswer) return sendError(res, 500, `Unknown CHAT_PROVIDER "${PROVIDER}". Use "anthropic", "openrouter" or "ollama".`);
+  if (!streamAnswer) return sendError(res, 500, `Unknown CHAT_PROVIDER "${PROVIDER}". Use "anthropic", "openrouter", "openai" or "ollama".`);
   if (rateLimited(req.socket.remoteAddress || 'unknown')) {
     return sendError(res, 429, 'Too many questions this hour. Please try again later.');
   }
@@ -562,7 +611,7 @@ function handleChatConfig(req, res) {
     enabled: chatEnabled(),
     provider: PROVIDER,
     model: MODEL || null,
-    privacyNote: PRIVACY_NOTES[PROVIDER] || null,
+    privacyNote: process.env.CHAT_PRIVACY_NOTE || PRIVACY_NOTES[PROVIDER] || null,
   }));
 }
 
